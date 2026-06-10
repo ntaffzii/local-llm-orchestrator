@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.venv
+.test-deps
+.pytest_cache
+__pycache__
+*.pyc
+run
+models
+tests
+docs
+scripts
+*.gguf
+*.bin
+

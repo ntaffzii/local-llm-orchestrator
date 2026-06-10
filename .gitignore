@@ -1,0 +1,10 @@
+.env
+.env.docker
+.venv/
+run/
+__pycache__/
+*.pyc
+.pytest_cache/
+.test-deps/
+models/**/*.gguf
+models/**/*.bin

@@ -1,0 +1,68 @@
+name: local-llm
+
+services:
+  llama-router:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    restart: unless-stopped
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --models-preset
+      - /config/models.ini
+      - --models-max
+      - ${LLAMA_MODELS_MAX:-2}
+      - --sleep-idle-seconds
+      - ${LLAMA_SLEEP_IDLE_SECONDS:-900}
+      - --metrics
+      - --no-ui
+    volumes:
+      - ./models:/models:ro
+      - ./config/models.ini:/config/models.ini:ro
+    expose:
+      - "8080"
+    networks:
+      - llm-internal
+    security_opt:
+      - no-new-privileges:true
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${ORCHESTRATOR_IMAGE:-local/local-llm-orchestrator:latest}
+    restart: unless-stopped
+    depends_on:
+      - llama-router
+    environment:
+      ORCHESTRATOR_HOST: 0.0.0.0
+      ORCHESTRATOR_PORT: "8090"
+      ORCHESTRATOR_WORKERS: "1"
+      ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:?Set ORCHESTRATOR_API_KEY in .env}
+      ORCHESTRATOR_LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-INFO}
+      ORCHESTRATOR_CORS_ORIGINS: ${ORCHESTRATOR_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      LLAMA_BASE_URL: http://llama-router:8080
+      MODEL_CONFIG_PATH: /app/config/models.json
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-300}
+      MCP_ENABLED: ${MCP_ENABLED:-false}
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-http://host.docker.internal:8765/mcp}
+      MCP_TOOL_ALLOWLIST: ${MCP_TOOL_ALLOWLIST:-}
+    volumes:
+      - ./config/models.json:/app/config/models.json:ro
+    ports:
+      - "${ORCHESTRATOR_BIND_IP:-127.0.0.1}:${ORCHESTRATOR_PORT:-8090}:8090"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      - llm-internal
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m
+
+networks:
+  llm-internal:
+    driver: bridge
+

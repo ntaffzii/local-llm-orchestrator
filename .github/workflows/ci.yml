@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: Validate Compose configuration
+        run: docker compose --env-file .env.docker.example config --quiet
+      - name: Validate configuration syntax
+        shell: pwsh
+        run: |
+          Get-Content config/models.json -Raw | ConvertFrom-Json | Out-Null
+          $tokens = $null
+          $errors = @()
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $localErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$localErrors
+            )
+            $errors += $localErrors
+          }
+          if ($errors.Count) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }

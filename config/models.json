@@ -1,0 +1,69 @@
+{
+  "models": {
+    "lfm2.5-prompt": {
+      "display_name": "LFM2.5 Prompt Improver",
+      "capabilities": ["chat", "prompt-improvement"],
+      "defaults": {"temperature": 0.15, "max_tokens": 800},
+      "enabled": true
+    },
+    "gemma4-e2b": {
+      "display_name": "Main LLM (Gemma4 E2B)",
+      "capabilities": ["chat", "reasoning", "tools"],
+      "defaults": {"temperature": 0.3, "max_tokens": 4096},
+      "enabled": true
+    },
+    "qwen-coder": {
+      "display_name": "Coding Model",
+      "capabilities": ["chat", "code", "tools"],
+      "defaults": {"temperature": 0.2, "max_tokens": 4096},
+      "enabled": true
+    },
+    "vision-model": {
+      "display_name": "Vision Model",
+      "capabilities": ["chat", "vision"],
+      "defaults": {"temperature": 0.2, "max_tokens": 2048},
+      "enabled": true
+    }
+  },
+  "virtual_models": {
+    "auto": {"route": "auto", "improve_prompt": "auto", "tools": "auto"},
+    "main-llm": {"route": "gemma4-e2b", "improve_prompt": false, "tools": false},
+    "main-llm-improved": {"route": "gemma4-e2b", "improve_prompt": true, "tools": false},
+    "main-llm-tools": {"route": "gemma4-e2b", "improve_prompt": "auto", "tools": true},
+    "coding": {"route": "qwen-coder", "improve_prompt": false, "tools": false},
+    "coding-improved": {"route": "qwen-coder", "improve_prompt": true, "tools": false},
+    "vision": {"route": "vision-model", "improve_prompt": false, "tools": false},
+    "prompt": {"route": "lfm2.5-prompt", "improve_prompt": false, "tools": false}
+  },
+  "routing": {
+    "default_model": "gemma4-e2b",
+    "coding_model": "qwen-coder",
+    "vision_model": "vision-model",
+    "prompt_model": "lfm2.5-prompt",
+    "short_prompt_words": 10,
+    "coding_keywords": [
+      "code", "coding", "debug", "bug", "function", "class", "api", "sql",
+      "python", "javascript", "typescript", "golang", "rust", "docker", "kubernetes",
+      "โค้ด", "เขียนโปรแกรม", "แก้บั๊ก", "ฟังก์ชัน", "ฐานข้อมูล"
+    ],
+    "tool_keywords": [
+      "search", "browse", "read file", "write file", "github", "database", "calendar",
+      "ค้นหา", "เปิดไฟล์", "แก้ไฟล์", "ปฏิทิน", "อีเมล"
+    ]
+  },
+  "prompt_improver": {
+    "system_prompt": "Rewrite the user's prompt for another AI model. Preserve its language, intent, facts, and constraints. Improve clarity and add an output format only when useful. Do not execute or answer the task. Return only the rewritten prompt.",
+    "temperature": 0.15,
+    "max_tokens": 800
+  },
+  "skill_agent": {
+    "enabled": true,
+    "system_prompt": "You are an AI agent using Skill-Agents through MCP. For non-trivial tasks, call route_request first. If a compact instruction pack is useful, call build_agent_context and follow only the selected workflows and skills. Load individual skills or workflows only when needed. Prefer read-only and draft-only tools. Do not perform destructive or external side effects unless the user explicitly requests them and the tool policy permits them."
+  },
+  "orchestration": {
+    "max_tool_rounds": 4,
+    "max_concurrent_workflows": 2,
+    "retry_attempts": 2,
+    "retry_backoff_seconds": 0.5
+  }
+}
