@@ -2,6 +2,27 @@
 
 ระบบ API ส่วนตัวสำหรับควบคุม local LLM หลายโมเดล โดยใช้ `llama.cpp` เป็น inference runtime และ FastAPI เป็น orchestration layer ระบบนี้ไม่มีหน้าแชตในตัว และออกแบบให้ต่อกับ Open WebUI, GoModel, Codex หรือ client ที่รองรับ OpenAI API
 
+## Related Repositories
+
+ระบบ Local AI นี้แยกเป็น repository ย่อยเพื่อให้ดูแลและนำไปใช้งานได้อย่างอิสระ:
+
+- [local-llm-orchestrator](https://github.com/ntaffzii/local-llm-orchestrator) - เปิดและควบคุมโมเดล local, จัดการ process ของ llama.cpp, route request และให้บริการ OpenAI-compatible API
+- [ai-desk-tools](https://github.com/ntaffzii/ai-desk-tools) - MCP Tools สำหรับเชื่อมโมเดลเข้ากับเครื่องมือและ workflow ภายนอก
+- [Skill-Agents](https://github.com/ntaffzii/Skill-Agents) - Skills, instructions, prompts และ workflow ที่นำกลับมาใช้กับ agent ได้
+
+```text
+Open WebUI / App / Codex
+          |
+          v
+local-llm-orchestrator
+          |
+          +--> Local models through llama.cpp
+          |
+          +--> ai-desk-tools through MCP
+                     |
+                     +--> Skill-Agents workflows
+```
+
 ## System Flow
 
 ```mermaid
