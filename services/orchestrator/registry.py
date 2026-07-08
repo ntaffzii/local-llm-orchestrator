@@ -7,6 +7,7 @@ from typing import Any
 @dataclass(frozen=True)
 class ModelSelection:
     requested: str
+    provider: str
     target: str
     improve_prompt: bool | str
     use_tools: bool | str
@@ -23,12 +24,14 @@ class ModelRegistry:
     def selection(self, requested: str) -> ModelSelection:
         policy = self.virtual_models.get(requested)
         if policy:
-            target = policy["route"]
+            target = policy.get("model", policy.get("route", requested))
             if target == "auto":
                 target = "auto"
             details = self.models.get(target, {})
+            provider = policy.get("provider") or details.get("provider", "local")
             return ModelSelection(
                 requested=requested,
+                provider=provider,
                 target=target,
                 improve_prompt=policy.get("improve_prompt", False),
                 use_tools=policy.get("tools", False),
@@ -40,6 +43,7 @@ class ModelRegistry:
             raise KeyError(requested)
         return ModelSelection(
             requested=requested,
+            provider=details.get("provider", "local"),
             target=requested,
             improve_prompt=False,
             use_tools=False,
@@ -52,6 +56,7 @@ class ModelRegistry:
         details = self.models[target]
         return ModelSelection(
             requested=base.requested,
+            provider=details.get("provider", base.provider),
             target=target,
             improve_prompt=base.improve_prompt,
             use_tools=base.use_tools,

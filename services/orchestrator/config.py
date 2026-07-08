@@ -58,3 +58,9 @@ def load_model_config(path: Path) -> dict[str, Any]:
     if not config.get("models") or not config.get("virtual_models"):
         raise ValueError("models.json must define models and virtual_models")
     return config
+
+
+def save_model_config(path: Path, config: dict[str, Any]) -> None:
+    if not config.get("models") or not config.get("virtual_models"):
+        raise ValueError("models.json must define models and virtual_models")
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
