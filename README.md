@@ -78,7 +78,7 @@ Requirements:
 - GGUF models ตามที่กำหนดใน `config/models.ini`
 
 ```powershell
-cd local-llm
+cd local-llm-orchestrator
 Copy-Item .env.example .env
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
@@ -95,16 +95,28 @@ API เริ่มต้น:
 Orchestrator: http://127.0.0.1:8090
 llama.cpp:    http://127.0.0.1:8080
 API docs:     http://127.0.0.1:8090/docs
+Admin UI:     http://127.0.0.1:8090/admin/ui
 ```
 
 Docker quick start:
 
+*(ตรวจสอบให้แน่ใจว่าอยู่ในโฟลเดอร์ `local-llm-orchestrator` ก่อนเริ่มรัน)*
+
 ```powershell
-Copy-Item .env.docker.example .env.docker
+# สุ่ม ORCHESTRATOR_API_KEY และสร้าง .env.docker ให้อัตโนมัติ
+.\scripts\set-api-key.ps1
+
+# หรือกำหนดคีย์เอง (อย่างน้อย 32 ตัวอักษร)
+.\scripts\set-api-key.ps1 -ApiKey "your-long-private-key-at-least-32-characters"
+
 .\scripts\docker-validate.ps1
 .\scripts\docker-up.ps1 -Build          # CPU
 .\scripts\docker-up.ps1 -Cuda -Build    # NVIDIA CUDA
 ```
+
+ถ้ายังไม่มี `.env.docker` คำสั่ง `docker-up.ps1` จะสร้างไฟล์และสุ่ม
+`ORCHESTRATOR_API_KEY` ให้เอง นอกจากนี้ยังกำหนดคีย์ขณะเริ่มระบบได้ด้วย
+`.\scripts\docker-up.ps1 -Build -ApiKey "your-long-private-key-at-least-32-characters"`
 
 ## Open WebUI / GoModel
 
@@ -122,6 +134,10 @@ API Key:  ค่า ORCHESTRATOR_API_KEY ใน .env
 - [Architecture](docs/ARCHITECTURE.md)
 - [API](docs/API.md)
 - [Configuration](docs/CONFIGURATION.md)
+- [Provider Routing and Prompt Improvement](docs/PROVIDER_ROUTING.md)
+- [Prompt Engine and MCP Prompt Tools](docs/PROMPT_ENGINE.md)
+- [Prompt Reference Sources and Local Adaptation](docs/PROMPT_REFERENCES.md)
+- [System Test Plan](docs/SYSTEM_TEST_PLAN.md)
 - [Operations](docs/OPERATIONS.md)
 - [Docker Deployment](docs/DOCKER.md)
 - [Using Skill-Agents](docs/SKILL_AGENTS.md)

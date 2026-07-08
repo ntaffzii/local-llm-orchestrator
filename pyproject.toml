@@ -27,4 +27,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["services*"]
+include = ["services*", "prompt_engine*"]

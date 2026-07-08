@@ -17,6 +17,9 @@ services:
       - ${LLAMA_SLEEP_IDLE_SECONDS:-900}
       - --metrics
       - --no-ui
+      - --no-warmup
+      - --parallel
+      - "1"
     volumes:
       - ./models:/models:ro
       - ./config/models.ini:/config/models.ini:ro
@@ -49,7 +52,7 @@ services:
       MCP_SERVER_URL: ${MCP_SERVER_URL:-http://host.docker.internal:8765/mcp}
       MCP_TOOL_ALLOWLIST: ${MCP_TOOL_ALLOWLIST:-}
     volumes:
-      - ./config/models.json:/app/config/models.json:ro
+      - ./config/models.json:/app/config/models.json
     ports:
       - "${ORCHESTRATOR_BIND_IP:-127.0.0.1}:${ORCHESTRATOR_PORT:-8090}:8090"
     extra_hosts:
@@ -65,4 +68,3 @@ services:
 networks:
   llm-internal:
     driver: bridge
-
