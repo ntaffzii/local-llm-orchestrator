@@ -18,7 +18,9 @@ def test_virtual_models_are_exposed():
 def test_auto_routes_code_to_coder():
     router = RequestRouter(ModelRegistry(CONFIG))
     messages = [ChatMessage(role="user", content="Please debug this Python function")]
-    assert router.route("auto", messages).target == "qwen-coder"
+    selection = router.route("auto", messages)
+    assert selection.provider == "local"
+    assert selection.target == "qwen-coder"
 
 
 def test_auto_routes_images_to_vision():
@@ -39,4 +41,3 @@ def test_short_auto_prompt_is_improved():
     router = RequestRouter(ModelRegistry(CONFIG))
     messages = [ChatMessage(role="user", content="Build an API")]
     assert router.should_improve("auto", messages) is True
-
