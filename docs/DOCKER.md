@@ -44,12 +44,21 @@ Models are mounted read-only at `/models`. They are not copied into either image
 
 ## Configure
 
+> [!IMPORTANT]
+> All commands below must be run from the `local-llm-orchestrator` directory.
+
 ```powershell
-cd C:\Users\natth\Documents\Skill-Agents\local-llm
-Copy-Item .env.docker.example .env.docker
+# Navigate to the orchestrator directory first
+cd local-llm-orchestrator
+.\scripts\set-api-key.ps1
 ```
 
-Edit `.env.docker` and replace `ORCHESTRATOR_API_KEY` with a long random value.
+The command creates `.env.docker` and generates a random `ORCHESTRATOR_API_KEY`.
+To provide your own key (at least 32 characters), run:
+
+```powershell
+.\scripts\set-api-key.ps1 -ApiKey "your-long-private-key-at-least-32-characters"
+```
 
 Validate Docker and all mounted model paths:
 
@@ -64,10 +73,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\docker-up.ps1 -Build
 ```
 
-Equivalent command:
+Equivalent command (run from the `local-llm-orchestrator` directory):
 
 ```powershell
-docker compose --env-file .env.docker up -d --build
+docker compose --env-file .env.docker -f compose.yaml up -d --build
 ```
 
 ## NVIDIA CUDA
@@ -84,7 +93,7 @@ Then start:
 .\scripts\docker-up.ps1 -Cuda -Build
 ```
 
-Equivalent command:
+Equivalent command (run from the `local-llm-orchestrator` directory):
 
 ```powershell
 docker compose --env-file .env.docker `
@@ -96,6 +105,8 @@ docker compose --env-file .env.docker `
 The official GPU images are built by llama.cpp, but their documentation notes that GPU variants receive less CI runtime testing than CPU images. Pin an image digest or dated tag before treating a deployment as stable.
 
 ## Operations
+
+Remember to run these from the `local-llm-orchestrator` directory:
 
 ```powershell
 .\scripts\docker-status.ps1

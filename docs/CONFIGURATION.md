@@ -39,21 +39,80 @@ Replace all placeholder filenames before starting the service.
 
 ## `config/models.json`
 
+`providers` defines OpenAI-compatible upstreams. `local` defaults to the
+llama.cpp router, while remote providers can read API keys from environment
+variables.
+
+```json
+"providers": {
+  "local": {
+    "type": "openai-compatible",
+    "base_url": "http://127.0.0.1:8080",
+    "api_key_env": ""
+  },
+  "openrouter": {
+    "type": "openai-compatible",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY"
+  }
+}
+```
+
 `models` describes physical model capabilities and generation defaults.
+Defaults may include `stop` and `chat_template_kwargs`; these are passed to
+the selected provider request. Model-specific stop tokens are merged with
+client-supplied stop tokens to reduce runaway generation loops.
 
 `virtual_models` defines client-visible behavior:
 
 ```json
 "main-llm-improved": {
-  "route": "gemma4-e2b",
+  "provider": "local",
+  "model": "gemma4-e2b",
   "improve_prompt": true,
   "tools": false
 }
 ```
 
+To keep prompt improvement local but send the final answer to another provider,
+change only the virtual model:
+
+```json
+"main-llm-improved": {
+  "provider": "openrouter",
+  "model": "openai/gpt-4.1-mini",
+  "improve_prompt": true,
+  "tools": false
+}
+```
+
+`prompt_improver.provider` and `prompt_improver.model` choose the model that
+rewrites user prompts. This can stay local even when the main model is remote.
+See [Provider Routing and Prompt Improvement](PROVIDER_ROUTING.md) for the
+end-to-end usage guide and request examples.
+
 `routing` contains deterministic keywords and target models used by `auto`.
 
 `orchestration` controls retry, concurrent workflows and maximum tool rounds.
+
+`mcp` controls MCP enablement and the active tool allowlist:
+
+```json
+"mcp": {
+  "enabled": true,
+  "tool_allowlist": [
+    "route_request",
+    "build_agent_context",
+    "read_file"
+  ]
+}
+```
+
+Use `PATCH /admin/mcp/tools` or the admin UI to update this list without
+editing JSON manually.
+
+In Docker, `config/models.json` is mounted writable so the admin UI and admin
+APIs can persist changes. Keep `.env` and API keys outside this file.
 
 After editing `models.json`, call:
 
@@ -62,4 +121,3 @@ POST /admin/reload
 ```
 
 After editing `models.ini`, restart the services.
-

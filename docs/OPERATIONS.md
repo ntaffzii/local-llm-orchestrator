@@ -62,6 +62,24 @@ MCP_TOOL_ALLOWLIST=search,read_file,repo_index
 
 Begin with a small read-only allowlist. Do not expose write, shell, email, or database mutation tools until their confirmation policy is defined.
 
+For the Docker-integrated local stack, the MCP server is built from the sibling
+`mcp-tools` repository through `compose.mcp.yaml` and should normally be reached
+inside Docker as:
+
+```env
+MCP_ENABLED=true
+MCP_SERVER_URL=http://mcp-tools:8765/mcp
+```
+
+After changing prompt engine files, rebuild both the orchestrator and MCP tools:
+
+```powershell
+docker compose --env-file .env.docker -f compose.yaml -f compose.cuda.yaml -f compose.mcp.yaml up -d --build orchestrator mcp-tools
+```
+
+See [Prompt Engine and MCP Prompt Tools](PROMPT_ENGINE.md) for prompt template
+behavior and prompt-tool test commands.
+
 ## Remote Access
 
 Preferred path:
@@ -75,4 +93,3 @@ Keep llama.cpp on `127.0.0.1`. Orchestrator may also stay on localhost when GoMo
 ## Backup
 
 Back up only configuration and documentation. GGUF files can be downloaded again and should not be stored in Git. Secrets belong in a password manager, not backups of the repository.
-
