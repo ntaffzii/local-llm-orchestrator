@@ -154,6 +154,7 @@ def admin_ui_html() -> str:
       font-size: 22px;
       font-weight: 750;
       letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
     }
     .metric-note {
       color: var(--muted);
@@ -225,6 +226,14 @@ def admin_ui_html() -> str:
     input:focus, select:focus, textarea:focus {
       outline: 2px solid rgba(11, 122, 117, 0.18);
       border-color: var(--accent);
+    }
+    button:focus-visible, .tab:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .field-error {
+      border-color: var(--danger) !important;
+      outline: 2px solid rgba(161, 59, 59, 0.25);
     }
     .row {
       display: grid;
@@ -369,6 +378,7 @@ def admin_ui_html() -> str:
       display: block;
       margin-bottom: 2px;
       font-size: 18px;
+      font-variant-numeric: tabular-nums;
     }
     .table {
       display: grid;
@@ -581,6 +591,7 @@ def admin_ui_html() -> str:
                 <button id="saveVirtualBtn">Save Route</button>
                 <button id="copyRouteBtn" class="secondary">Copy JSON</button>
               </div>
+              <div class="hint" style="margin-top:8px">Saving applies immediately and reloads the running service.</div>
             </section>
 
             <section>
@@ -613,6 +624,7 @@ def admin_ui_html() -> str:
               <div class="actions">
                 <button id="savePromptBtn">Save Improver</button>
               </div>
+              <div class="hint" style="margin-top:8px">Saving applies immediately and reloads the running service.</div>
             </section>
           </div>
 
@@ -726,6 +738,7 @@ def admin_ui_html() -> str:
                 <button id="saveMcpBtn">Save selection</button>
                 <button id="loadMcpBtn" class="secondary">Refresh tools</button>
               </div>
+              <div class="hint" style="margin-top:8px">Saving applies immediately and reloads the running service.</div>
             </section>
             <section>
               <div class="section-head">
@@ -1046,22 +1059,66 @@ def admin_ui_html() -> str:
 $body = ${JSON.stringify(sample, null, 2)} | ConvertTo-Json -Depth 10
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" -Headers $headers -Body $body`;
     }
+    function markFieldError(id, on) {
+      const el = $(id);
+      if (el) el.classList.toggle("field-error", on);
+    }
+    async function probeReady() {
+      // Backend health is secondary to the admin config, and can be slow/unreachable,
+      // so probe it after the console has already painted.
+      try {
+        state.ready = await api("/ready");
+      } catch (err) {
+        state.ready = { status: "unavailable", error: err.message };
+      }
+      updateMetrics();
+      if (state.ready?.status !== "ready") {
+        setStatus(`Connected. Note: llama.cpp is not reachable (${state.ready?.error || "unknown"}). Admin settings still work.`, "warn");
+      }
+    }
     async function loadAll() {
+      markFieldError("apiKey", false);
+      markFieldError("adminKey", false);
       if (!key()) {
+        markFieldError("apiKey", true);
+        $("apiKey").focus();
         setStatus("API key is required.", "err");
         return;
       }
       setStatus("Connecting...");
-      const health = await publicApi("/health");
+
+      let health;
       try {
-        state.ready = await api("/ready");
+        health = await publicApi("/health");
       } catch (err) {
-        // llama.cpp being unreachable must not block the admin console, which is
-        // independent of the inference backend.
-        state.ready = { status: "unavailable", error: err.message };
+        setStatus("Cannot reach the orchestrator: " + err.message, "err");
+        return;
       }
-      state.models = await api("/v1/models");
-      state.config = await api("/admin/config", { admin: true });
+
+      // Inference key unlocks the model list.
+      try {
+        state.models = await api("/v1/models");
+      } catch (err) {
+        markFieldError("apiKey", true);
+        $("apiKey").focus();
+        setStatus("API key rejected (" + err.message + "). Check the API key field.", "err");
+        return;
+      }
+
+      // The console itself is an admin surface, so it needs the admin key. When a
+      // separate ORCHESTRATOR_ADMIN_API_KEY is set, point the user at the Admin field
+      // instead of failing with a cryptic error and a blank page.
+      try {
+        state.config = await api("/admin/config", { admin: true });
+      } catch (err) {
+        markFieldError("adminKey", true);
+        $("adminKey").focus();
+        updateMetrics();
+        renderModels();
+        setStatus("Admin access denied (" + err.message + "). Fill the Admin key field (it can differ from the API key), then Connect.", "err");
+        return;
+      }
+
       fillSelect($("promptProvider"), providerNames());
       fillSelect($("mainProvider"), providerNames());
       fillSelect($("virtualModel"), virtualNames());
@@ -1069,22 +1126,19 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       loadPromptForm();
       loadMcpForm();
       loadPlaygroundSelects();
-      try {
-        await listMcpTools(false);
-      } catch (err) {
-        $("mcpOutput").textContent = pretty({ error: err.message });
-        renderMcpTools();
-      }
       updateMetrics();
       renderProviders();
       renderModels();
       renderRoutes();
       renderSnippets();
-      if (state.ready?.status === "ready") {
-        setStatus(`Connected: ${health.service} ${health.version}`, "ok");
-      } else {
-        setStatus(`Console loaded, but llama.cpp is not reachable (${state.ready?.error || "unknown"}). Admin settings still work.`, "warn");
-      }
+      setStatus(`Connected: ${health.service} ${health.version}`, "ok");
+
+      // Secondary data loads in the background so the console paints immediately.
+      probeReady();
+      listMcpTools(false).catch(err => {
+        $("mcpOutput").textContent = pretty({ error: err.message });
+        renderMcpTools();
+      });
     }
     async function saveRoute() {
       const body = {
@@ -1227,6 +1281,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("copyRouteBtn").addEventListener("click", () => copyText(pretty(state.config?.virtual_models?.[$("virtualModel").value] || {})));
     $("copyCurlBtn").addEventListener("click", () => copyText($("curlSnippet").textContent));
     $("copyPsBtn").addEventListener("click", () => copyText($("psSnippet").textContent));
+    $("apiKey").addEventListener("input", () => markFieldError("apiKey", false));
+    $("adminKey").addEventListener("input", () => markFieldError("adminKey", false));
     $("apiKey").value = sessionStorage.getItem("orchestratorApiKey") || "";
     $("adminKey").value = sessionStorage.getItem("orchestratorAdminKey") || "";
     renderSnippets();
