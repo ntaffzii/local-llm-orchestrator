@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from prompt_engine import consult_prompt
 
 from .admin_ui import admin_ui_html
-from .config import get_settings, load_model_config, save_model_config
+from .config import get_settings, load_model_config, save_model_config, validate_model_config
 from .llama_client import ProviderClients
 from .mcp_client import McpClient
 from .prompt_service import improve_prompt
@@ -43,8 +44,13 @@ logging.basicConfig(
 logger = logging.getLogger("local_llm.orchestrator")
 
 
-def build_components() -> tuple[dict[str, Any], ModelRegistry, RequestRouter, ProviderClients, McpClient, OrchestratorService]:
-    config = load_model_config(settings.model_config_path)
+def build_components(
+    config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ModelRegistry, RequestRouter, ProviderClients, McpClient, OrchestratorService]:
+    if config is None:
+        config = load_model_config(settings.model_config_path)
+    else:
+        validate_model_config(config)
     registry = ModelRegistry(config)
     router = RequestRouter(registry)
     orchestration = config["orchestration"]
@@ -127,18 +133,93 @@ async def request_context(request: Request, call_next):
     return response
 
 
-def require_api_key(authorization: str | None = Header(default=None)) -> None:
-    if settings.api_key and authorization != f"Bearer {settings.api_key}":
-        raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
+class AuthThrottle:
+    """Small in-process throttle that locks out an IP after repeated auth failures.
+
+    This is defence-in-depth for a locally exposed admin API, not a substitute for a
+    real WAF. State is per-process and resets on restart.
+    """
+
+    def __init__(self, max_failures: int = 10, window_seconds: float = 60.0, lockout_seconds: float = 300.0) -> None:
+        self.max_failures = max_failures
+        self.window = window_seconds
+        self.lockout = lockout_seconds
+        self._failures: dict[str, list[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def check(self, ip: str) -> None:
+        locked_until = self._locked_until.get(ip)
+        if locked_until and time.time() < locked_until:
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "too_many_attempts", "message": "Too many failed authentication attempts. Try again later."},
+            )
+
+    def record_failure(self, ip: str) -> None:
+        now = time.time()
+        recent = [t for t in self._failures.get(ip, []) if t >= now - self.window]
+        recent.append(now)
+        if len(recent) >= self.max_failures:
+            self._locked_until[ip] = now + self.lockout
+            self._failures.pop(ip, None)
+        else:
+            self._failures[ip] = recent
+
+    def record_success(self, ip: str) -> None:
+        self._failures.pop(ip, None)
+        self._locked_until.pop(ip, None)
+
+    def reset(self) -> None:
+        self._failures.clear()
+        self._locked_until.clear()
 
 
-def require_admin_api_key(authorization: str | None = Header(default=None)) -> None:
+auth_throttle = AuthThrottle()
+
+
+def _client_ip(request: Request) -> str:
+    if settings.trust_forwarded_for:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            # Left-most entry is the original client when set by a trusted proxy.
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _bearer_matches(authorization: str | None, expected: str) -> bool:
+    if not authorization:
+        return False
+    return secrets.compare_digest(authorization, f"Bearer {expected}")
+
+
+def require_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
     if not settings.api_key:
+        return
+    ip = _client_ip(request)
+    auth_throttle.check(ip)
+    if not _bearer_matches(authorization, settings.api_key):
+        auth_throttle.record_failure(ip)
+        raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
+    auth_throttle.record_success(ip)
+
+
+def require_admin_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
+    admin_key = settings.admin_api_key or settings.api_key
+    if not admin_key:
         raise HTTPException(
             status_code=401,
-            detail={"code": "api_key_required", "message": "Set ORCHESTRATOR_API_KEY before using admin APIs"},
+            detail={
+                "code": "api_key_required",
+                "message": "Set ORCHESTRATOR_ADMIN_API_KEY (or ORCHESTRATOR_API_KEY) before using admin APIs",
+            },
         )
-    require_api_key(authorization)
+    ip = _client_ip(request)
+    auth_throttle.check(ip)
+    if not _bearer_matches(authorization, admin_key):
+        auth_throttle.record_failure(ip)
+        logger.warning("admin_auth_failed ip=%s path=%s", ip, request.url.path)
+        raise HTTPException(status_code=401, detail={"code": "invalid_admin_api_key", "message": "Invalid admin API key"})
+    auth_throttle.record_success(ip)
 
 
 def upstream_error(exc: httpx.HTTPStatusError) -> HTTPException:
@@ -245,6 +326,8 @@ async def health() -> dict[str, Any]:
 
 @app.get("/admin/ui", response_class=HTMLResponse)
 async def admin_ui() -> HTMLResponse:
+    if not settings.admin_ui_enabled:
+        raise HTTPException(status_code=404, detail={"code": "admin_ui_disabled", "message": "Admin UI is disabled"})
     return HTMLResponse(admin_ui_html())
 
 
@@ -372,9 +455,21 @@ async def call_mcp_tool(request: ToolCallRequest, _: None = Depends(require_api_
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
 
 
+def _audit(http_request: Request, action: str, **fields: Any) -> None:
+    request_id = getattr(http_request.state, "request_id", "-")
+    # Strip CR/LF from user-supplied values so a crafted model/provider name cannot
+    # forge extra log lines.
+    def _clean(value: Any) -> str:
+        return str(value).replace("\r", " ").replace("\n", " ")
+
+    extra = " ".join(f"{key}={_clean(value)}" for key, value in fields.items())
+    logger.info("admin_audit id=%s ip=%s action=%s %s", request_id, _client_ip(http_request), action, extra)
+
+
 @app.post("/admin/reload")
-async def reload_config(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+async def reload_config(http_request: Request, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     reload_components()
+    _audit(http_request, "reload")
     return {"success": True, "models": len(model_config["models"]), "virtual_models": len(model_config["virtual_models"])}
 
 
@@ -386,6 +481,7 @@ async def admin_config(_: None = Depends(require_admin_api_key)) -> dict[str, An
 @app.post("/admin/config/virtual-model")
 async def update_virtual_model(
     request: UpdateVirtualModelRequest,
+    http_request: Request,
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
     if request.provider not in model_config.get("providers", {"local": {}}):
@@ -401,12 +497,14 @@ async def update_virtual_model(
     }
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "update_virtual_model", virtual_model=request.virtual_model, provider=request.provider, target=request.model)
     return model_config
 
 
 @app.post("/admin/config/prompt-improver")
 async def update_prompt_improver(
     request: UpdatePromptImproverRequest,
+    http_request: Request,
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
     if request.provider not in model_config.get("providers", {"local": {}}):
@@ -422,23 +520,37 @@ async def update_prompt_improver(
     updated["prompt_improver"] = prompt
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "update_prompt_improver", provider=request.provider, model=request.model)
     return model_config
 
 
 @app.put("/admin/config")
-async def update_admin_config(new_config: dict[str, Any], _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
-    if "models" not in new_config or "virtual_models" not in new_config:
+async def update_admin_config(
+    new_config: dict[str, Any],
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    try:
+        # Dry-run: fully build components from the candidate config before touching disk,
+        # so an invalid payload can never corrupt the persisted config or break a restart.
+        build_components(new_config)
+    except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(
             status_code=400,
-            detail={"code": "invalid_config", "message": "Config must contain models and virtual_models"},
-        )
+            detail={"code": "invalid_config", "message": f"Config rejected: {exc}"},
+        ) from exc
     save_model_config(settings.model_config_path, new_config)
     reload_components()
+    _audit(http_request, "replace_config", models=len(model_config["models"]), virtual_models=len(model_config["virtual_models"]))
     return {"success": True, "models": len(model_config["models"]), "virtual_models": len(model_config["virtual_models"])}
 
 
 @app.patch("/admin/mcp/tools")
-async def patch_mcp_tools(request: PatchMcpToolsRequest, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+async def patch_mcp_tools(
+    request: PatchMcpToolsRequest,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
     updated = deepcopy(model_config)
     mcp_config = updated.setdefault("mcp", {})
     if request.enabled is not None:
@@ -456,6 +568,7 @@ async def patch_mcp_tools(request: PatchMcpToolsRequest, _: None = Depends(requi
     mcp_config["tool_allowlist"] = sorted(allowlist)
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "patch_mcp_tools", enabled=mcp_client.enabled, tools=len(mcp_client.allowlist))
     return {
         "success": True,
         "mcp_enabled": mcp_client.enabled,

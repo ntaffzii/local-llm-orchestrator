@@ -10,7 +10,7 @@ def admin_ui_html() -> str:
   <title>GoModel Local LLM Console</title>
   <style>
     :root {
-      color-scheme: light;
+      color-scheme: light dark;
       --bg: #f4f6f8;
       --panel: #ffffff;
       --panel-soft: #f9fafb;
@@ -26,6 +26,30 @@ def admin_ui_html() -> str:
       --danger: #a13b3b;
       --ok: #1e7a4f;
       --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e141b;
+        --panel: #171f28;
+        --panel-soft: #1d2731;
+        --text: #e6edf3;
+        --muted: #93a1b0;
+        --line: #2b3743;
+        --accent: #4bd0c6;
+        --accent-soft: #123833;
+        --blue: #6ea0ff;
+        --blue-soft: #16263f;
+        --warn: #e0b35c;
+        --warn-soft: #3a2e14;
+        --danger: #f08a8a;
+        --ok: #5fce93;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      }
+      header { background: rgba(23, 31, 40, 0.96); }
+      input, select, textarea { background: #0f1720; color: var(--text); }
+      button.secondary, button.ghost { background: var(--panel); }
+      .th { background: #1d2731; }
+      .tab.active { color: var(--accent); }
     }
     * { box-sizing: border-box; }
     body {
@@ -261,6 +285,7 @@ def admin_ui_html() -> str:
     }
     .status.ok { border-color: rgba(30, 122, 79, 0.35); color: var(--ok); background: #f0fbf5; }
     .status.err { border-color: rgba(161, 59, 59, 0.35); color: var(--danger); background: #fff3f3; }
+    .status.warn { border-color: rgba(161, 92, 19, 0.35); color: var(--warn); background: var(--warn-soft); }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -398,7 +423,7 @@ def admin_ui_html() -> str:
     }
     .api-key-box {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
       gap: 8px;
       align-items: end;
     }
@@ -441,8 +466,13 @@ def admin_ui_html() -> str:
       </div>
       <div class="api-key-box">
         <div>
-          <label for="apiKey">ORCHESTRATOR_API_KEY</label>
-          <input id="apiKey" type="password" autocomplete="off" placeholder="Bearer key">
+          <label for="apiKey">API key</label>
+          <input id="apiKey" type="password" autocomplete="off" placeholder="ORCHESTRATOR_API_KEY">
+        </div>
+        <div title="Only needed if ORCHESTRATOR_ADMIN_API_KEY is set to a different value than the API key. Leave empty to reuse the API key for admin actions.">
+          <label for="adminKey">Admin key <span class="hint">optional</span></label>
+          <input id="adminKey" type="password" autocomplete="off" placeholder="ORCHESTRATOR_ADMIN_API_KEY"
+                 aria-label="Admin API key, optional, only if different from the API key">
         </div>
         <button id="rememberBtn" class="ghost">Remember</button>
         <button id="loadBtn">Connect</button>
@@ -460,12 +490,12 @@ def admin_ui_html() -> str:
             <button id="reloadBtn" class="ghost">Reload</button>
           </div>
         </section>
-        <nav class="panel tabs" aria-label="Console sections">
-          <button class="tab active" data-view="overview">Overview</button>
-          <button class="tab" data-view="routing">Routing</button>
-          <button class="tab" data-view="playground">Playground</button>
-          <button class="tab" data-view="tools">Tools</button>
-          <button class="tab" data-view="api">API</button>
+        <nav class="panel tabs" aria-label="Console sections" role="tablist">
+          <button class="tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="overview">Overview</button>
+          <button class="tab" data-view="routing" role="tab" aria-selected="false" aria-controls="routing" tabindex="-1">Routing</button>
+          <button class="tab" data-view="playground" role="tab" aria-selected="false" aria-controls="playground" tabindex="-1">Playground</button>
+          <button class="tab" data-view="tools" role="tab" aria-selected="false" aria-controls="tools" tabindex="-1">Tools</button>
+          <button class="tab" data-view="api" role="tab" aria-selected="false" aria-controls="api" tabindex="-1">API</button>
         </nav>
       </aside>
 
@@ -756,8 +786,12 @@ def admin_ui_html() -> str:
     const tabs = [...document.querySelectorAll(".tab")];
 
     function key() { return $("apiKey").value.trim(); }
+    function adminKey() { return $("adminKey").value.trim() || key(); }
     function authHeaders() {
       return { "Authorization": "Bearer " + key(), "Content-Type": "application/json; charset=utf-8" };
+    }
+    function adminAuthHeaders() {
+      return { "Authorization": "Bearer " + adminKey(), "Content-Type": "application/json; charset=utf-8" };
     }
     function setStatus(text, kind = "") {
       const el = $("status");
@@ -777,7 +811,8 @@ def admin_ui_html() -> str:
       return value || "false";
     }
     async function api(path, options = {}) {
-      const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
+      const baseHeaders = options.admin ? adminAuthHeaders() : authHeaders();
+      const response = await fetch(path, { ...options, headers: { ...baseHeaders, ...(options.headers || {}) } });
       const text = await response.text();
       let data = {};
       try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
@@ -863,8 +898,8 @@ def admin_ui_html() -> str:
     function updateMetrics() {
       $("metricApi").textContent = "OK";
       $("metricApiNote").textContent = "local-llm-orchestrator";
-      $("metricLlama").textContent = state.ready?.status === "ready" ? "Ready" : "--";
-      $("metricLlamaNote").textContent = state.ready?.llama_cpp?.status || "/ready";
+      $("metricLlama").textContent = state.ready?.status === "ready" ? "Ready" : (state.ready?.status === "unavailable" ? "Down" : "--");
+      $("metricLlamaNote").textContent = state.ready?.status === "ready" ? (state.ready?.llama_cpp?.status || "ok") : (state.ready?.error || "/ready");
       const allModels = state.models?.data || [];
       $("metricModels").textContent = String(allModels.length || "--");
       $("metricModelsNote").textContent = `${Object.keys(state.config?.models || {}).length} physical, ${virtualNames().length} virtual`;
@@ -1018,9 +1053,15 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       }
       setStatus("Connecting...");
       const health = await publicApi("/health");
-      state.ready = await api("/ready");
+      try {
+        state.ready = await api("/ready");
+      } catch (err) {
+        // llama.cpp being unreachable must not block the admin console, which is
+        // independent of the inference backend.
+        state.ready = { status: "unavailable", error: err.message };
+      }
       state.models = await api("/v1/models");
-      state.config = await api("/admin/config");
+      state.config = await api("/admin/config", { admin: true });
       fillSelect($("promptProvider"), providerNames());
       fillSelect($("mainProvider"), providerNames());
       fillSelect($("virtualModel"), virtualNames());
@@ -1039,7 +1080,11 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       renderModels();
       renderRoutes();
       renderSnippets();
-      setStatus(`Connected: ${health.service} ${health.version}`, "ok");
+      if (state.ready?.status === "ready") {
+        setStatus(`Connected: ${health.service} ${health.version}`, "ok");
+      } else {
+        setStatus(`Console loaded, but llama.cpp is not reachable (${state.ready?.error || "unknown"}). Admin settings still work.`, "warn");
+      }
     }
     async function saveRoute() {
       const body = {
@@ -1050,7 +1095,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
         tools: parsePolicy($("toolsPolicy").value)
       };
       setStatus("Saving route...");
-      state.config = await api("/admin/config/virtual-model", { method: "POST", body: JSON.stringify(body) });
+      state.config = await api("/admin/config/virtual-model", { method: "POST", admin: true, body: JSON.stringify(body) });
       loadRouteForm();
       renderRoutes();
       updateMetrics();
@@ -1069,7 +1114,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       if (updated.prompt_improver.temperature === null) delete updated.prompt_improver.temperature;
       if (updated.prompt_improver.max_tokens === null) delete updated.prompt_improver.max_tokens;
       setStatus("Saving prompt improver...");
-      await api("/admin/config", { method: "PUT", body: JSON.stringify(updated) });
+      await api("/admin/config", { method: "PUT", admin: true, body: JSON.stringify(updated) });
       await loadAll();
       setStatus("Prompt improver saved and reloaded.", "ok");
     }
@@ -1078,6 +1123,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       setStatus("Saving MCP tools...");
       await api("/admin/mcp/tools", {
         method: "PATCH",
+        admin: true,
         body: JSON.stringify({ enabled: $("mcpEnabled").value === "true", set_tools: next })
       });
       await loadAll();
@@ -1124,7 +1170,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     }
     async function reloadConfig() {
       setStatus("Reloading components...");
-      await api("/admin/reload", { method: "POST", body: "{}" });
+      await api("/admin/reload", { method: "POST", admin: true, body: "{}" });
       await loadAll();
       setStatus("Components reloaded.", "ok");
     }
@@ -1132,12 +1178,26 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       await navigator.clipboard.writeText(text);
       setStatus("Copied to clipboard.", "ok");
     }
-    tabs.forEach(tab => {
-      tab.addEventListener("click", () => {
-        tabs.forEach(x => x.classList.remove("active"));
-        views.forEach(x => x.classList.remove("active"));
-        tab.classList.add("active");
-        $(tab.dataset.view).classList.add("active");
+    function activateTab(tab, focus = false) {
+      tabs.forEach(x => {
+        const on = x === tab;
+        x.classList.toggle("active", on);
+        x.setAttribute("aria-selected", on ? "true" : "false");
+        x.tabIndex = on ? 0 : -1;
+      });
+      views.forEach(x => x.classList.remove("active"));
+      $(tab.dataset.view).classList.add("active");
+      if (focus) tab.focus();
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => activateTab(tab));
+      tab.addEventListener("keydown", (event) => {
+        let next = null;
+        if (event.key === "ArrowRight" || event.key === "ArrowDown") next = tabs[(index + 1) % tabs.length];
+        else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = tabs[(index - 1 + tabs.length) % tabs.length];
+        else if (event.key === "Home") next = tabs[0];
+        else if (event.key === "End") next = tabs[tabs.length - 1];
+        if (next) { event.preventDefault(); activateTab(next, true); }
       });
     });
     $("loadBtn").addEventListener("click", () => loadAll().catch(err => setStatus(err.message, "err")));
@@ -1145,7 +1205,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("reloadBtn").addEventListener("click", () => reloadConfig().catch(err => setStatus(err.message, "err")));
     $("rememberBtn").addEventListener("click", () => {
       sessionStorage.setItem("orchestratorApiKey", key());
-      setStatus("Key remembered for this browser tab.", "ok");
+      sessionStorage.setItem("orchestratorAdminKey", $("adminKey").value.trim());
+      setStatus("Keys remembered for this browser tab.", "ok");
     });
     $("virtualModel").addEventListener("change", loadRouteForm);
     $("saveVirtualBtn").addEventListener("click", () => saveRoute().catch(err => setStatus(err.message, "err")));
@@ -1167,6 +1228,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("copyCurlBtn").addEventListener("click", () => copyText($("curlSnippet").textContent));
     $("copyPsBtn").addEventListener("click", () => copyText($("psSnippet").textContent));
     $("apiKey").value = sessionStorage.getItem("orchestratorApiKey") || "";
+    $("adminKey").value = sessionStorage.getItem("orchestratorAdminKey") || "";
     renderSnippets();
   </script>
 </body>

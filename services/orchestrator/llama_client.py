@@ -75,7 +75,7 @@ class ProviderClients:
         provider_config.setdefault("local", {"base_url": default_base_url})
         self.clients = {
             name: LlamaClient(
-                details.get("base_url", default_base_url),
+                details.get("base_url") or default_base_url,
                 timeout,
                 attempts=attempts,
                 backoff=backoff,

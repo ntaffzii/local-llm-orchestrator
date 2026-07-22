@@ -2,7 +2,7 @@
   "providers": {
     "local": {
       "type": "openai-compatible",
-      "base_url": "http://llama-router:8080",
+      "base_url": "",
       "api_key_env": ""
     },
     "lmstudio": {

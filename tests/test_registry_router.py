@@ -41,3 +41,36 @@ def test_short_auto_prompt_is_improved():
     router = RequestRouter(ModelRegistry(CONFIG))
     messages = [ChatMessage(role="user", content="Build an API")]
     assert router.should_improve("auto", messages) is True
+
+
+def test_physical_models_have_matching_llama_presets():
+    import re
+
+    ini_text = (Path(__file__).parents[1] / "config" / "models.ini").read_text(encoding="utf-8")
+    ini_sections = {m.group(1) for m in re.finditer(r"^\[(.+)\]\s*$", ini_text, re.MULTILINE)}
+    ini_sections.discard("*")
+    physical_models = set(CONFIG["models"].keys())
+    # Every physical model exposed by the orchestrator must have a llama.cpp preset,
+    # so config/models.json and config/models.ini cannot silently drift apart.
+    missing = physical_models - ini_sections
+    assert not missing, f"models.json models without a models.ini preset: {sorted(missing)}"
+
+
+def test_save_config_falls_back_to_in_place_write_when_replace_fails(tmp_path, monkeypatch):
+    import os as _os
+    from services.orchestrator import config as config_module
+
+    target = tmp_path / "models.json"
+    target.write_text("old", encoding="utf-8")
+
+    def _boom(src, dst):
+        raise OSError("Device or resource busy")
+
+    # Simulate the Docker case where os.replace onto a bind-mounted file fails.
+    monkeypatch.setattr(config_module.os, "replace", _boom)
+    config_module.save_model_config(target, CONFIG)
+
+    written = config_module.load_model_config(target)
+    assert written["models"]
+    # No temp files should be left behind.
+    assert not list(tmp_path.glob("*.tmp-*"))
