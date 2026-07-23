@@ -69,3 +69,7 @@ class PatchMcpToolsRequest(BaseModel):
     set_tools: list[str] | None = None
     allow_tools: list[str] | None = None
     deny_tools: list[str] | None = None
+
+
+class CreateApiKeyRequest(BaseModel):
+    label: str = Field(default="unnamed", max_length=80)

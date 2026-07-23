@@ -8,3 +8,6 @@ __pycache__/
 .test-deps/
 models/**/*.gguf
 models/**/*.bin
+
+# Issued API keys (hashes) — never commit
+config/api_keys.json

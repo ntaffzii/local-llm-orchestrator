@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from prompt_engine import consult_prompt
 
 from .admin_ui import admin_ui_html
+from .api_keys import ApiKeyStore
 from .config import get_settings, load_model_config, save_model_config, validate_model_config
 from .docker_control import DockerControl, DockerControlDisabled, DockerControlError
 from .llama_client import ProviderClients
@@ -29,6 +30,7 @@ from .router import RequestRouter
 from .schemas import (
     ChatRequest,
     ConsultPromptRequest,
+    CreateApiKeyRequest,
     ImprovePromptRequest,
     OrchestrateRequest,
     PatchMcpToolsRequest,
@@ -52,6 +54,7 @@ metrics_store = MetricsStore()
 docker_control = DockerControl(
     settings.docker_control_enabled, settings.docker_socket, settings.docker_compose_project
 )
+api_key_store = ApiKeyStore(settings.api_keys_path)
 
 
 def build_components(
@@ -208,15 +211,31 @@ def _bearer_matches(authorization: str | None, expected: str) -> bool:
     return secrets.compare_digest(authorization, f"Bearer {expected}")
 
 
+def _bearer_token(authorization: str | None) -> str | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return authorization[len("Bearer ") :]
+
+
 def require_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
-    if not settings.api_key:
+    # Open mode only when no auth is configured at all (root key unset and no managed keys).
+    if not settings.api_key and not api_key_store.has_keys():
         return
     ip = _client_ip(request)
     auth_throttle.check(ip)
-    if not _bearer_matches(authorization, settings.api_key):
-        auth_throttle.record_failure(ip)
-        raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
-    auth_throttle.record_success(ip)
+    token = _bearer_token(authorization)
+    if token:
+        if settings.api_key and secrets.compare_digest(token, settings.api_key):
+            request.state.api_key_label = "root"
+            auth_throttle.record_success(ip)
+            return
+        record = api_key_store.verify(token)
+        if record is not None:
+            request.state.api_key_label = record["label"]
+            auth_throttle.record_success(ip)
+            return
+    auth_throttle.record_failure(ip)
+    raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
 
 
 def require_admin_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
@@ -514,6 +533,35 @@ async def admin_audit_log(_: None = Depends(require_admin_api_key)) -> dict[str,
 @app.get("/admin/metrics")
 async def admin_metrics(window_seconds: float = 3600.0, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     return metrics_store.summary(window_seconds=window_seconds)
+
+
+@app.get("/admin/api-keys")
+async def list_api_keys(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return {"keys": api_key_store.list()}
+
+
+@app.post("/admin/api-keys")
+async def create_api_key(
+    request: CreateApiKeyRequest,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    record, raw_key = api_key_store.create(request.label)
+    _audit(http_request, "create_api_key", key_id=record["id"], label=record["label"])
+    # The raw key is returned exactly once; it is never stored or shown again.
+    return {"key": raw_key, "record": record}
+
+
+@app.delete("/admin/api-keys/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    if not api_key_store.revoke(key_id):
+        raise HTTPException(status_code=404, detail={"code": "api_key_not_found", "id": key_id})
+    _audit(http_request, "revoke_api_key", key_id=key_id)
+    return {"success": True, "id": key_id}
 
 
 @app.get("/admin/services")

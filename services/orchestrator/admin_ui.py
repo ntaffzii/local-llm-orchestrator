@@ -443,6 +443,24 @@ def admin_ui_html() -> str:
     .tr.models { grid-template-columns: 190px 150px minmax(180px, 1fr) 96px; }
     .tr.providers { grid-template-columns: 140px minmax(230px, 1fr) 150px; }
     .tr.audit { grid-template-columns: 160px 150px minmax(180px, 1fr) 120px; }
+    .tr.keys { grid-template-columns: minmax(120px, 1fr) 160px 140px 140px 92px; }
+    .key-code {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .key-code code {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      font: 12px/1.5 Consolas, "SFMono-Regular", monospace;
+      overflow-wrap: anywhere;
+    }
     .th {
       background: var(--panel-soft);
       color: var(--muted);
@@ -810,6 +828,8 @@ def admin_ui_html() -> str:
             <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M8 8h8v3a4 4 0 0 1-8 0V8ZM12 15v6"/></svg></span>Tools</button>
           <button class="tab" data-view="api" role="tab" aria-selected="false" aria-controls="api" tabindex="-1">
             <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg></span>API</button>
+          <button class="tab" data-view="access" role="tab" aria-selected="false" aria-controls="access" tabindex="-1">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2"/></svg></span>Access</button>
         </nav>
       </aside>
 
@@ -1144,6 +1164,35 @@ def admin_ui_html() -> str:
             <pre id="psSnippet"></pre>
           </section>
         </div>
+
+        <div id="access" class="view">
+          <section>
+            <div class="section-head">
+              <h2>API Keys</h2>
+              <span class="hint">Issue inference keys to other people; revoke any time</span>
+            </div>
+            <div class="row">
+              <div>
+                <label for="newKeyLabel">Label</label>
+                <input id="newKeyLabel" maxlength="80" placeholder="team-member-a">
+              </div>
+              <div style="display:flex; align-items:flex-end;">
+                <div class="actions" style="margin-top:0">
+                  <button id="createKeyBtn">Create key</button>
+                </div>
+              </div>
+            </div>
+            <div id="newKeyReveal" class="status" style="display:none"></div>
+            <div class="hint" style="margin-top:8px">Keys grant inference access only, never admin. The full key is shown once and stored as a hash.</div>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>Issued Keys</h2>
+              <span class="hint">Label, prefix, and usage — the secret is never shown again</span>
+            </div>
+            <div id="apiKeys" class="table"></div>
+          </section>
+        </div>
       </div>
     </div>
   </main>
@@ -1414,6 +1463,62 @@ def admin_ui_html() -> str:
           <div class="stat-row"><span class="stat-value">${esc(t.value)}</span>${deltaChip(t.delta, t.higherIsBetter)}</div>
         </div>`).join("");
       el.innerHTML = tileHtml + `<div class="spark"><div class="stat-label">Requests / 5 min</div>${sparkline(m.series)}</div>`;
+    }
+    async function renderApiKeys() {
+      const table = $("apiKeys");
+      if (!table) return;
+      let keys = [];
+      try {
+        keys = (await api("/admin/api-keys", { admin: true })).keys || [];
+      } catch (err) {
+        table.innerHTML = `<div class="status err">Could not load keys: ${esc(err.message)}</div>`;
+        return;
+      }
+      table.innerHTML = `<div class="tr keys th"><span>Label</span><span>Prefix</span><span>Created</span><span>Last used</span><span>Action</span></div>`;
+      const active = keys.filter(k => !k.revoked);
+      if (!active.length) {
+        const empty = document.createElement("div");
+        empty.className = "status";
+        empty.textContent = "No active keys. Create one above to share access.";
+        table.appendChild(empty);
+        return;
+      }
+      for (const k of active) {
+        const row = document.createElement("div");
+        row.className = "tr keys";
+        row.innerHTML = `
+          <div class="td" data-label="Label"><span class="badge">${esc(k.label)}</span></div>
+          <div class="td" data-label="Prefix"><code style="font-size:12px">${esc(k.prefix)}…</code></div>
+          <div class="td" data-label="Created">${esc(fmtTime(k.created_at))}</div>
+          <div class="td" data-label="Last used">${esc(k.last_used_at ? fmtTime(k.last_used_at) : "never")}</div>
+          <div class="td" data-label="Action"><button class="ghost toggle-btn" data-id="${esc(k.id)}">Revoke</button></div>
+        `;
+        row.querySelector("button").addEventListener("click", () => revokeKey(k.id, k.label));
+        table.appendChild(row);
+      }
+    }
+    async function createKey() {
+      const label = $("newKeyLabel").value.trim() || "unnamed";
+      setStatus("Creating key...");
+      const data = await api("/admin/api-keys", { method: "POST", admin: true, body: JSON.stringify({ label }) });
+      const reveal = $("newKeyReveal");
+      reveal.style.display = "block";
+      reveal.className = "status ok";
+      reveal.innerHTML = `Copy this key now — it will not be shown again:
+        <div class="key-code"><code id="newKeyValue">${esc(data.key)}</code><button id="copyNewKeyBtn" class="secondary">Copy</button></div>`;
+      $("copyNewKeyBtn").addEventListener("click", () => copyText(data.key));
+      $("newKeyLabel").value = "";
+      await renderApiKeys();
+      renderAudit();
+      setStatus(`Key "${esc(data.record.label)}" created.`, "ok");
+    }
+    async function revokeKey(id, label) {
+      if (!confirm(`Revoke key "${label}"? Clients using it will stop working immediately.`)) return;
+      setStatus("Revoking key...");
+      await api(`/admin/api-keys/${encodeURIComponent(id)}`, { method: "DELETE", admin: true });
+      await renderApiKeys();
+      renderAudit();
+      setStatus("Key revoked.", "ok");
     }
     async function renderServices() {
       const el = $("services");
@@ -1719,6 +1824,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       renderAudit();
       renderTraffic();
       renderServices();
+      renderApiKeys();
       setStatus(`Connected: ${health.service} ${health.version}`, "ok");
 
       // Secondary data loads in the background so the console paints immediately.
@@ -1866,6 +1972,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
         setStatus("Preset applied. Click Save selection to apply.", "ok");
       });
     });
+    $("createKeyBtn").addEventListener("click", () => createKey().catch(err => setStatus(err.message, "err")));
     $("runPlayBtn").addEventListener("click", runPlayground);
     $("copyPlayBtn").addEventListener("click", () => copyText(pretty(playgroundPayload())));
     $("copyRouteBtn").addEventListener("click", () => copyText(pretty(state.config?.virtual_models?.[$("virtualModel").value] || {})));

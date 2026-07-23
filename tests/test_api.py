@@ -267,3 +267,45 @@ def test_docker_services_control(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_api_key_lifecycle_and_managed_key_auth(tmp_path, monkeypatch):
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="root", admin_api_key="admin", model_config_path=temp_config),
+    )
+    monkeypatch.setattr(main_module, "api_key_store", ApiKeyStore(tmp_path / "api_keys.json"))
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    admin = {"Authorization": "Bearer admin"}
+    try:
+        # Create returns the raw key exactly once.
+        created = client.post("/admin/api-keys", headers=admin, json={"label": "member-a"})
+        assert created.status_code == 200
+        raw = created.json()["key"]
+        key_id = created.json()["record"]["id"]
+
+        # The managed key works for inference endpoints...
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {raw}"}).status_code == 200
+        # ...but not for admin endpoints.
+        assert client.get("/admin/config", headers={"Authorization": f"Bearer {raw}"}).status_code == 401
+
+        # Listing never leaks the secret.
+        listing = client.get("/admin/api-keys", headers=admin).json()["keys"]
+        assert any(k["id"] == key_id for k in listing)
+        assert all("hash" not in k for k in listing)
+
+        # Revoke disables it.
+        assert client.delete(f"/admin/api-keys/{key_id}", headers=admin).status_code == 200
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {raw}"}).status_code == 401
+        # Creating a key requires admin auth.
+        assert client.post("/admin/api-keys", json={"label": "x"}).status_code == 401
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()

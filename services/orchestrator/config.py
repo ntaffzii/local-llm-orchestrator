@@ -40,12 +40,16 @@ class Settings:
     docker_control_enabled: bool
     docker_socket: str
     docker_compose_project: str
+    api_keys_path: Path
 
 
 def get_settings() -> Settings:
     config_path = Path(os.getenv("MODEL_CONFIG_PATH", str(ROOT / "config" / "models.json")))
     if not config_path.is_absolute():
         config_path = (ROOT / config_path).resolve()
+    api_keys_path = Path(os.getenv("API_KEYS_PATH", str(ROOT / "config" / "api_keys.json")))
+    if not api_keys_path.is_absolute():
+        api_keys_path = (ROOT / api_keys_path).resolve()
     return Settings(
         llama_base_url=os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080").rstrip("/"),
         api_key=os.getenv("ORCHESTRATOR_API_KEY", ""),
@@ -55,6 +59,7 @@ def get_settings() -> Settings:
         docker_control_enabled=_bool("DOCKER_CONTROL_ENABLED"),
         docker_socket=os.getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
         docker_compose_project=os.getenv("DOCKER_COMPOSE_PROJECT", "local-llm"),
+        api_keys_path=api_keys_path,
         request_timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "300")),
         model_config_path=config_path,
         log_level=os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper(),
@@ -88,13 +93,11 @@ def load_model_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def save_model_config(path: Path, config: dict[str, Any]) -> None:
-    validate_model_config(config)
-    payload = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+def atomic_write_json(path: Path, data: Any) -> None:
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     # Prefer an atomic temp-write + replace so a crash mid-write can never leave a
-    # truncated config on disk. This fails when the target is a bind-mounted single
-    # file on a read-only rootfs (the Docker deployment), so fall back to an in-place
-    # write there. The dry-run validation in the caller already guards content quality.
+    # truncated file on disk. This fails when the target is a bind-mounted single
+    # file on a read-only rootfs, so fall back to an in-place write there.
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid4().hex}")
     try:
         tmp.write_text(payload, encoding="utf-8")
@@ -105,3 +108,8 @@ def save_model_config(path: Path, config: dict[str, Any]) -> None:
         except OSError:
             pass
         path.write_text(payload, encoding="utf-8")
+
+
+def save_model_config(path: Path, config: dict[str, Any]) -> None:
+    validate_model_config(config)
+    atomic_write_json(path, config)

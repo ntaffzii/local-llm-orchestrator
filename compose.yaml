@@ -55,7 +55,9 @@ services:
       MCP_SERVER_URL: ${MCP_SERVER_URL:-http://host.docker.internal:8765/mcp}
       MCP_TOOL_ALLOWLIST: ${MCP_TOOL_ALLOWLIST:-}
     volumes:
-      - ./config/models.json:/app/config/models.json
+      # Mount the whole config dir (not just models.json) so runtime files such as
+      # api_keys.json persist and atomic replace works within one filesystem.
+      - ./config:/app/config
     ports:
       - "${ORCHESTRATOR_BIND_IP:-127.0.0.1}:${ORCHESTRATOR_PORT:-8090}:8090"
     extra_hosts:
