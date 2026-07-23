@@ -360,3 +360,36 @@ def test_api_key_scope_and_rate_limit(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_api_key_tools_scope_enforced(tmp_path, monkeypatch):
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="root", admin_api_key="admin", model_config_path=temp_config),
+    )
+    monkeypatch.setattr(main_module, "api_key_store", ApiKeyStore(tmp_path / "api_keys.json"))
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    admin = {"Authorization": "Bearer admin"}
+    try:
+        created = client.post(
+            "/admin/api-keys", headers=admin, json={"label": "toolscoped", "tools": ["route_request"]}
+        )
+        raw = created.json()["key"]
+        key_headers = {"Authorization": f"Bearer {raw}", "Content-Type": "application/json"}
+        # A tool outside the key's scope is rejected with 403 before MCP is contacted.
+        forbidden = client.post("/mcp/call", headers=key_headers, json={"name": "read_file", "arguments": {}})
+        assert forbidden.status_code == 403
+        assert forbidden.json()["detail"]["code"] == "tool_forbidden"
+        # The audit records the tools scope on creation.
+        entries = client.get("/admin/audit", headers=admin).json()["entries"]
+        assert any(e["action"] == "create_api_key" and e["fields"].get("tools") == "route_request" for e in entries)
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()

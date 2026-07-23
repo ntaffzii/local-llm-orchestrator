@@ -51,6 +51,7 @@ class ApiKeyStore:
         label: str,
         models: list[str] | None = None,
         rate_limit_per_min: int = 0,
+        tools: list[str] | None = None,
     ) -> tuple[dict[str, Any], str]:
         key_id = secrets.token_hex(4)
         raw = f"llmk_{key_id}_{secrets.token_urlsafe(32)}"
@@ -62,8 +63,12 @@ class ApiKeyStore:
             "created_at": time.time(),
             "last_used_at": None,
             "revoked": False,
-            # scopes.models is an allowlist of client-facing model names; empty = all.
-            "scopes": {"models": [m.strip() for m in (models or []) if m.strip()]},
+            # scopes.models: allowlist of client-facing model names, empty = all.
+            # scopes.tools: None = all tools, [] = no tools, [names] = only those.
+            "scopes": {
+                "models": [m.strip() for m in (models or []) if m.strip()],
+                "tools": None if tools is None else [t.strip() for t in tools if t.strip()],
+            },
             "rate_limit_per_min": max(0, int(rate_limit_per_min or 0)),
         }
         self._keys.append(record)
@@ -103,6 +108,9 @@ class ApiKeyStore:
             "created_at": key["created_at"],
             "last_used_at": key.get("last_used_at"),
             "revoked": key["revoked"],
-            "scopes": key.get("scopes") or {"models": []},
+            "scopes": {
+                "models": (key.get("scopes") or {}).get("models") or [],
+                "tools": (key.get("scopes") or {}).get("tools", None),
+            },
             "rate_limit_per_min": int(key.get("rate_limit_per_min", 0) or 0),
         }

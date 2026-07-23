@@ -306,3 +306,27 @@ async def test_repeated_tool_call_finishes_without_tools():
             "result_preview": "result",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_allowed_tools_scope_filters_offered_tools():
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "answered without tools"}, "finish_reason": "stop"}]}
+    mcp = AsyncMock()
+    mcp.list_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}
+    ]
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-tools",
+        improve_prompt=False,
+        messages=[{"role": "user", "content": "Search for local LLM information"}],
+    )
+
+    # The key may only use "route_request", so "search" is filtered out -> no tools offered.
+    response = await service.orchestrate(request, allowed_tools={"route_request"})
+
+    assert response["choices"][0]["message"]["content"] == "answered without tools"
+    mcp.call_tool.assert_not_awaited()
+    payload = client.post_json.await_args_list[0].args[2]
+    assert "tools" not in payload

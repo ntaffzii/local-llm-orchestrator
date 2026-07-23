@@ -1185,6 +1185,20 @@ def admin_ui_html() -> str:
                 <input id="newKeyRate" type="number" min="0" step="1" value="0" placeholder="0 = unlimited">
               </div>
             </div>
+            <div class="row">
+              <div>
+                <label for="newKeyToolsMode">MCP tools</label>
+                <select id="newKeyToolsMode">
+                  <option value="all">All tools</option>
+                  <option value="none">No tools</option>
+                  <option value="list">Specific tools</option>
+                </select>
+              </div>
+              <div>
+                <label for="newKeyTools">Tool names (when specific)</label>
+                <input id="newKeyTools" placeholder="route_request, load_skill">
+              </div>
+            </div>
             <div class="actions">
               <button id="createKeyBtn">Create key</button>
             </div>
@@ -1493,7 +1507,12 @@ def admin_ui_html() -> str:
       }
       for (const k of active) {
         const scopeModels = (k.scopes && k.scopes.models) || [];
-        const scopeText = scopeModels.length ? scopeModels.join(", ") : "all models";
+        const modelsText = scopeModels.length ? scopeModels.join(", ") : "all models";
+        const toolsScope = k.scopes ? k.scopes.tools : null;
+        const toolsText = (toolsScope === null || toolsScope === undefined)
+          ? "all tools"
+          : (toolsScope.length ? `tools: ${toolsScope.join(", ")}` : "no tools");
+        const scopeText = `${modelsText} · ${toolsText}`;
         const rateText = k.rate_limit_per_min ? `${k.rate_limit_per_min}/min` : "∞";
         const reqCount = byKey[k.label] || 0;
         const row = document.createElement("div");
@@ -1514,10 +1533,14 @@ def admin_ui_html() -> str:
       const label = $("newKeyLabel").value.trim() || "unnamed";
       const models = $("newKeyModels").value.split(",").map(x => x.trim()).filter(Boolean);
       const rate = Number($("newKeyRate").value || 0);
+      const toolsMode = $("newKeyToolsMode").value;
+      let tools = null; // all
+      if (toolsMode === "none") tools = [];
+      else if (toolsMode === "list") tools = $("newKeyTools").value.split(",").map(x => x.trim()).filter(Boolean);
       setStatus("Creating key...");
       const data = await api("/admin/api-keys", {
         method: "POST", admin: true,
-        body: JSON.stringify({ label, models, rate_limit_per_min: rate })
+        body: JSON.stringify({ label, models, rate_limit_per_min: rate, tools })
       });
       const reveal = $("newKeyReveal");
       reveal.style.display = "block";
@@ -1528,6 +1551,8 @@ def admin_ui_html() -> str:
       $("newKeyLabel").value = "";
       $("newKeyModels").value = "";
       $("newKeyRate").value = "0";
+      $("newKeyToolsMode").value = "all";
+      $("newKeyTools").value = "";
       await renderApiKeys();
       renderAudit();
       setStatus(`Key "${esc(data.record.label)}" created.`, "ok");

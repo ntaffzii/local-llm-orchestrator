@@ -44,3 +44,17 @@ def test_create_stores_scopes_and_rate_limit(tmp_path):
     assert record["rate_limit_per_min"] == 5
     # Reloading preserves scopes.
     assert ApiKeyStore(tmp_path / "api_keys.json").list()[0]["scopes"]["models"] == ["main-llm", "coding"]
+
+
+def test_tools_scope_semantics(tmp_path):
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    all_tools, _ = store.create("a", tools=None)
+    no_tools, _ = store.create("b", tools=[])
+    some_tools, _ = store.create("c", tools=["route_request", " load_skill "])
+    assert all_tools["scopes"]["tools"] is None          # None = all
+    assert no_tools["scopes"]["tools"] == []             # [] = none
+    assert some_tools["scopes"]["tools"] == ["route_request", "load_skill"]
+    # Persists across reload.
+    reloaded = {k["label"]: k for k in ApiKeyStore(tmp_path / "api_keys.json").list()}
+    assert reloaded["a"]["scopes"]["tools"] is None
+    assert reloaded["b"]["scopes"]["tools"] == []

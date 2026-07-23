@@ -35,7 +35,9 @@ class OrchestratorService:
         self._apply_defaults(payload, selection)
         return payload, selection
 
-    async def orchestrate(self, request: OrchestrateRequest) -> dict[str, Any]:
+    async def orchestrate(
+        self, request: OrchestrateRequest, allowed_tools: set[str] | None = None
+    ) -> dict[str, Any]:
         async with self.workflow_slots:
             selection = self.router.route(request.model, request.messages)
             messages = [message.model_dump(exclude_none=True) for message in request.messages]
@@ -56,7 +58,7 @@ class OrchestratorService:
             self._apply_defaults(payload, selection)
 
             if use_tools:
-                return await self._run_tool_loop(selection.provider, payload)
+                return await self._run_tool_loop(selection.provider, payload, allowed_tools)
             return await self.client.post_json(selection.provider, "/v1/chat/completions", payload)
 
     async def _rewrite_last_user(self, messages: list[dict[str, Any]], prompt_model: str | None) -> None:
@@ -72,7 +74,9 @@ class OrchestratorService:
                 )
                 return
 
-    async def _run_tool_loop(self, provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _run_tool_loop(
+        self, provider: str, payload: dict[str, Any], allowed_tools: set[str] | None = None
+    ) -> dict[str, Any]:
         tool_trace: list[dict[str, Any]] = []
         try:
             tools = await self.mcp.list_openai_tools()
@@ -98,6 +102,9 @@ class OrchestratorService:
                     }
                 ],
             )
+        if allowed_tools is not None:
+            # Per-key tools scope: only offer the tools this key may use.
+            tools = [tool for tool in tools if (tool.get("function") or {}).get("name") in allowed_tools]
         if not tools:
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
@@ -133,10 +140,16 @@ class OrchestratorService:
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments or "{}")
                 seen_tool_calls.add(self._tool_call_signature(function["name"], arguments))
-                try:
-                    result = await self.mcp.call_tool(function["name"], arguments)
-                except Exception as exc:
-                    result = {"is_error": True, "content": [{"type": "text", "text": f"MCP tool failed: {exc}"}]}
+                if allowed_tools is not None and function["name"] not in allowed_tools:
+                    result = {
+                        "is_error": True,
+                        "content": [{"type": "text", "text": f"Tool not permitted for this key: {function['name']}"}],
+                    }
+                else:
+                    try:
+                        result = await self.mcp.call_tool(function["name"], arguments)
+                    except Exception as exc:
+                        result = {"is_error": True, "content": [{"type": "text", "text": f"MCP tool failed: {exc}"}]}
                 tool_trace.append(
                     {
                         "round": tool_rounds + 1,

@@ -303,6 +303,24 @@ def enforce_model_scope(http_request: Request, model: str) -> None:
         )
 
 
+def key_tools_scope(http_request: Request) -> set[str] | None:
+    """Return the key's tool allowlist, or None for unrestricted (root / all-tools)."""
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return None
+    tools = (record.get("scopes") or {}).get("tools")
+    return None if tools is None else set(tools)
+
+
+def enforce_tool_scope(http_request: Request, tool_name: str) -> None:
+    allowed = key_tools_scope(http_request)
+    if allowed is not None and tool_name not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "tool_forbidden", "message": f"This key cannot use tool: {tool_name}"},
+        )
+
+
 def upstream_error(exc: httpx.HTTPStatusError) -> HTTPException:
     try:
         detail: Any = exc.response.json()
@@ -447,7 +465,7 @@ async def chat(request: ChatRequest, http_request: Request, _: None = Depends(re
 
         if workflow_required(request):
             workflow_request = OrchestrateRequest.model_validate(request.model_dump())
-            response = await orchestrator.orchestrate(workflow_request)
+            response = await orchestrator.orchestrate(workflow_request, allowed_tools=key_tools_scope(http_request))
             if request.stream:
                 return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
             return JSONResponse(response)
@@ -510,7 +528,7 @@ async def orchestrate(request: OrchestrateRequest, http_request: Request, _: Non
                 return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
             return JSONResponse(response)
 
-        response = await orchestrator.orchestrate(request)
+        response = await orchestrator.orchestrate(request, allowed_tools=key_tools_scope(http_request))
         if request.stream:
             return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
         return JSONResponse(response)
@@ -521,13 +539,20 @@ async def orchestrate(request: OrchestrateRequest, http_request: Request, _: Non
 
 
 @app.get("/mcp/tools")
-async def list_mcp_tools(_: None = Depends(require_api_key)) -> dict[str, Any]:
+async def list_mcp_tools(http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    scope = key_tools_scope(http_request)
+
+    def _scoped(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if scope is None:
+            return tools
+        return [tool for tool in tools if (tool.get("function") or {}).get("name") in scope]
+
     try:
         return {
             "enabled": mcp_client.enabled,
-            "tool_allowlist": sorted(mcp_client.allowlist),
-            "tools": await mcp_client.list_openai_tools(),
-            "available_tools": await mcp_client.list_openai_tools(include_blocked=True, include_disabled=True),
+            "tool_allowlist": sorted(mcp_client.allowlist if scope is None else (mcp_client.allowlist & scope)),
+            "tools": _scoped(await mcp_client.list_openai_tools()),
+            "available_tools": _scoped(await mcp_client.list_openai_tools(include_blocked=True, include_disabled=True)),
         }
     except BaseExceptionGroup as exc:
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
@@ -536,7 +561,8 @@ async def list_mcp_tools(_: None = Depends(require_api_key)) -> dict[str, Any]:
 
 
 @app.post("/mcp/call")
-async def call_mcp_tool(request: ToolCallRequest, _: None = Depends(require_api_key)) -> dict[str, Any]:
+async def call_mcp_tool(request: ToolCallRequest, http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    enforce_tool_scope(http_request, request.name)
     try:
         return await mcp_client.call_tool(request.name, request.arguments)
     except PermissionError as exc:
@@ -601,14 +627,19 @@ async def create_api_key(
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
     record, raw_key = api_key_store.create(
-        request.label, models=request.models, rate_limit_per_min=request.rate_limit_per_min
+        request.label,
+        models=request.models,
+        rate_limit_per_min=request.rate_limit_per_min,
+        tools=request.tools,
     )
+    scoped_tools = record["scopes"]["tools"]
     _audit(
         http_request,
         "create_api_key",
         key_id=record["id"],
         label=record["label"],
         models=",".join(record["scopes"]["models"]) or "all",
+        tools="all" if scoped_tools is None else (",".join(scoped_tools) or "none"),
         rate=record["rate_limit_per_min"],
     )
     # The raw key is returned exactly once; it is never stored or shown again.
