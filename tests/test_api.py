@@ -32,7 +32,7 @@ def test_models_reject_wrong_api_key():
 def test_admin_ui_is_served_without_api_key():
     response = TestClient(app).get("/admin/ui")
     assert response.status_code == 200
-    assert "Local LLM Admin" in response.text
+    assert "Local LLM Orchestrator" in response.text
 
 
 def test_admin_config_requires_api_key():

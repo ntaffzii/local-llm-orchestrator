@@ -7,7 +7,7 @@ def admin_ui_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GoModel Local LLM Console</title>
+  <title>Local LLM Orchestrator</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -18,38 +18,44 @@ def admin_ui_html() -> str:
       --muted: #647082;
       --line: #d8dee7;
       --accent: #0b7a75;
+      --accent-strong: #075b57;
       --accent-soft: #dff5f2;
       --blue: #2f6fed;
       --blue-soft: #e8efff;
       --warn: #a15c13;
       --warn-soft: #fff2d8;
       --danger: #a13b3b;
+      --danger-soft: #fff3f3;
       --ok: #1e7a4f;
+      --ok-soft: #f0fbf5;
+      --radius: 10px;
       --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+      --shadow-hover: 0 4px 14px rgba(15, 23, 42, 0.12);
+      --header-bg: rgba(255, 255, 255, 0.9);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #0e141b;
-        --panel: #171f28;
-        --panel-soft: #1d2731;
-        --text: #e6edf3;
-        --muted: #93a1b0;
-        --line: #2b3743;
-        --accent: #4bd0c6;
-        --accent-soft: #123833;
+        --bg: #08090c;
+        --panel: #0f1216;
+        --panel-soft: #161a20;
+        --text: #e8edf4;
+        --muted: #8b95a5;
+        --line: #232a33;
+        --accent: #3ad4c6;
+        --accent-strong: #2ab5a8;
+        --accent-soft: #0e2f2b;
         --blue: #6ea0ff;
-        --blue-soft: #16263f;
-        --warn: #e0b35c;
-        --warn-soft: #3a2e14;
-        --danger: #f08a8a;
+        --blue-soft: #14223a;
+        --warn: #e5b968;
+        --warn-soft: #2f2711;
+        --danger: #f28b8b;
+        --danger-soft: #2c1414;
         --ok: #5fce93;
-        --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+        --ok-soft: #10281b;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+        --shadow-hover: 0 6px 20px rgba(0, 0, 0, 0.6);
+        --header-bg: rgba(10, 12, 16, 0.85);
       }
-      header { background: rgba(23, 31, 40, 0.96); }
-      input, select, textarea { background: #0f1720; color: var(--text); }
-      button.secondary, button.ghost { background: var(--panel); }
-      .th { background: #1d2731; }
-      .tab.active { color: var(--accent); }
     }
     * { box-sizing: border-box; }
     body {
@@ -64,8 +70,8 @@ def admin_ui_html() -> str:
       top: 0;
       z-index: 10;
       border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.96);
-      backdrop-filter: blur(10px);
+      background: var(--header-bg);
+      backdrop-filter: blur(12px);
     }
     .wrap {
       width: min(1440px, calc(100vw - 32px));
@@ -85,15 +91,17 @@ def admin_ui_html() -> str:
       min-width: 0;
     }
     .mark {
-      width: 38px;
-      height: 38px;
+      width: 40px;
+      height: 40px;
       display: grid;
       place-items: center;
-      border: 1px solid #8fd8d0;
-      border-radius: 8px;
-      background: linear-gradient(145deg, #e8fbf8, #ffffff);
-      color: var(--accent);
+      border-radius: 11px;
+      background: linear-gradient(145deg, var(--accent), var(--accent-strong));
+      color: #ffffff;
       font-weight: 800;
+      font-size: 15px;
+      letter-spacing: 0.5px;
+      box-shadow: 0 3px 10px rgba(11, 122, 117, 0.35);
     }
     h1 {
       margin: 0;
@@ -125,8 +133,16 @@ def admin_ui_html() -> str:
     section, .panel {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: var(--radius);
       box-shadow: var(--shadow);
+    }
+    .metric {
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+    }
+    .metric:hover {
+      border-color: var(--accent);
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
     }
     section { padding: 16px; }
     .content {
@@ -169,17 +185,29 @@ def admin_ui_html() -> str:
     }
     .tab {
       width: 100%;
-      min-height: 36px;
+      min-height: 38px;
       justify-content: flex-start;
+      gap: 10px;
       background: transparent;
-      color: var(--text);
+      color: var(--muted);
       border-color: transparent;
+      font-weight: 600;
     }
+    .tab::before {
+      content: "";
+      width: 3px;
+      height: 16px;
+      border-radius: 2px;
+      background: transparent;
+    }
+    .tab:hover:not(.active) { background: var(--panel-soft); color: var(--text); filter: none; box-shadow: none; }
+    .tab.active:hover { filter: none; box-shadow: none; }
     .tab.active {
       background: var(--accent-soft);
-      color: #075b57;
-      border-color: #b8e7e1;
+      color: var(--accent);
+      border-color: transparent;
     }
+    .tab.active::before { background: var(--accent); }
     .view { display: none; }
     .view.active { display: grid; gap: 16px; }
     .section-head {
@@ -211,13 +239,15 @@ def admin_ui_html() -> str:
       width: 100%;
       min-height: 38px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
+      border-radius: 8px;
+      background: var(--panel);
       color: var(--text);
       padding: 8px 10px;
       font: inherit;
       font-size: 14px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
+    input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.7; }
     textarea {
       resize: vertical;
       min-height: 118px;
@@ -256,7 +286,7 @@ def admin_ui_html() -> str:
       justify-content: center;
       gap: 7px;
       border: 1px solid var(--accent);
-      border-radius: 6px;
+      border-radius: 8px;
       background: var(--accent);
       color: #fff;
       padding: 8px 12px;
@@ -264,19 +294,32 @@ def admin_ui_html() -> str:
       font-size: 14px;
       font-weight: 650;
       cursor: pointer;
+      transition: filter 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     }
+    button:hover:not(:disabled) {
+      filter: brightness(1.08);
+      box-shadow: var(--shadow-hover);
+    }
+    button:active:not(:disabled) { filter: brightness(0.96); box-shadow: none; }
     button.secondary {
-      background: #fff;
-      color: #075b57;
+      background: var(--panel);
+      color: var(--accent);
     }
     button.blue {
       border-color: var(--blue);
       background: var(--blue);
+      color: #fff;
     }
     button.ghost {
       border-color: var(--line);
-      background: #fff;
+      background: var(--panel);
       color: var(--text);
+    }
+    button.secondary:hover:not(:disabled),
+    button.ghost:hover:not(:disabled) {
+      filter: none;
+      border-color: var(--accent);
+      color: var(--accent);
     }
     button:disabled {
       opacity: 0.55;
@@ -292,9 +335,9 @@ def admin_ui_html() -> str:
       font-size: 13px;
       overflow-wrap: anywhere;
     }
-    .status.ok { border-color: rgba(30, 122, 79, 0.35); color: var(--ok); background: #f0fbf5; }
-    .status.err { border-color: rgba(161, 59, 59, 0.35); color: var(--danger); background: #fff3f3; }
-    .status.warn { border-color: rgba(161, 92, 19, 0.35); color: var(--warn); background: var(--warn-soft); }
+    .status.ok { border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }
+    .status.err { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+    .status.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -302,14 +345,14 @@ def admin_ui_html() -> str:
       padding: 3px 8px;
       border-radius: 999px;
       background: var(--blue-soft);
-      color: #244f9f;
+      color: var(--blue);
       font-size: 12px;
       font-weight: 700;
       white-space: nowrap;
     }
-    .badge.ok { background: #dff8ea; color: var(--ok); }
+    .badge.ok { background: var(--ok-soft); color: var(--ok); }
     .badge.warn { background: var(--warn-soft); color: var(--warn); }
-    .badge.muted { background: #eef1f5; color: var(--muted); }
+    .badge.muted { background: var(--panel-soft); color: var(--muted); border: 1px solid var(--line); }
     .toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -339,8 +382,10 @@ def admin_ui_html() -> str:
       padding: 11px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: var(--panel);
+      transition: border-color 0.15s ease, background-color 0.15s ease;
     }
+    .tool-item:hover { border-color: var(--accent); }
     .tool-item.disabled {
       background: var(--panel-soft);
       color: var(--muted);
@@ -393,16 +438,18 @@ def admin_ui_html() -> str:
       align-items: center;
     }
     .tr:first-child { border-top: 0; }
+    .tr:not(.th):hover { background: var(--panel-soft); }
     .tr.routes { grid-template-columns: 170px 120px minmax(180px, 1fr) 96px 86px; }
     .tr.models { grid-template-columns: 190px 150px minmax(180px, 1fr) 96px; }
     .tr.providers { grid-template-columns: 140px minmax(230px, 1fr) 150px; }
     .th {
-      background: #eef2f5;
+      background: var(--panel-soft);
       color: var(--muted);
       font-size: 12px;
       font-weight: 750;
       text-transform: uppercase;
     }
+    .th:hover { background: var(--panel-soft); }
     .td, .th span {
       padding: 10px 12px;
       min-width: 0;
@@ -461,17 +508,21 @@ def admin_ui_html() -> str:
         text-transform: uppercase;
       }
     }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+      .metric:hover { transform: none; }
+    }
   </style>
 </head>
 <body>
-  <!-- Local LLM Admin -->
+  <!-- Local LLM Orchestrator admin console -->
   <header>
     <div class="wrap topbar">
       <div class="brand">
-        <div class="mark">GM</div>
+        <div class="mark">LO</div>
         <div>
-          <h1>GoModel Local LLM Console</h1>
-          <div class="subtitle">OpenAI-compatible bot API gateway for local llama.cpp models, prompt routing, and MCP tools</div>
+          <h1>Local LLM Orchestrator</h1>
+          <div class="subtitle">OpenAI-compatible gateway for local llama.cpp models — routing, prompt improvement, and MCP tools</div>
         </div>
       </div>
       <div class="api-key-box">
