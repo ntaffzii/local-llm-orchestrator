@@ -659,6 +659,51 @@ def admin_ui_html() -> str:
       .ep-arrow { display: none; }
       .ep-models { margin-left: 0; }
     }
+    .traffic {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr)) 1.3fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-soft);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      align-content: space-between;
+      transition: border-color 0.15s ease;
+    }
+    .stat:hover { border-color: var(--accent); }
+    .stat-label { color: var(--muted); font-size: 12px; font-weight: 650; }
+    .stat-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .stat-value { font-size: 22px; font-weight: 750; font-variant-numeric: tabular-nums; }
+    .delta {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .delta.up { background: var(--ok-soft); color: var(--ok); }
+    .delta.down { background: var(--danger-soft); color: var(--danger); }
+    .delta.flat { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+    .spark {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-soft);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+    .spark svg { width: 100%; height: 52px; }
+    @media (max-width: 900px) { .traffic { grid-template-columns: repeat(2, minmax(0, 1fr)); } .spark { grid-column: 1 / -1; } }
+    @media (max-width: 560px) { .traffic { grid-template-columns: 1fr; } }
     .api-key-box {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
@@ -809,6 +854,13 @@ def admin_ui_html() -> str:
               <span class="hint">Gateway to provider routing and reachability</span>
             </div>
             <div id="endpoints" class="endpoints"></div>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>Traffic</h2>
+              <span class="hint">Inference requests, last hour vs the hour before</span>
+            </div>
+            <div id="traffic" class="traffic"></div>
           </section>
           <section>
             <div class="section-head">
@@ -1302,6 +1354,46 @@ def admin_ui_html() -> str:
         table.appendChild(row);
       }
     }
+    function deltaChip(delta, higherIsBetter) {
+      if (delta === null || delta === undefined) return `<span class="delta flat">no baseline</span>`;
+      if (delta === 0) return `<span class="delta flat">0%</span>`;
+      const up = delta > 0;
+      const good = up === higherIsBetter;
+      return `<span class="delta ${good ? "up" : "down"}">${up ? "▲" : "▼"} ${esc(Math.abs(delta))}%</span>`;
+    }
+    function sparkline(series) {
+      const values = series && series.length ? series : [0];
+      const max = Math.max(1, ...values);
+      const n = values.length;
+      const w = 200, h = 48;
+      const points = values.map((v, i) => `${(n > 1 ? (i / (n - 1)) * w : 0).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`).join(" ");
+      return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><polyline points="${points}"/></svg>`;
+    }
+    async function renderTraffic() {
+      const el = $("traffic");
+      if (!el) return;
+      let m;
+      try {
+        m = await api("/admin/metrics", { admin: true });
+      } catch (err) {
+        el.innerHTML = `<div class="status">Could not load metrics: ${esc(err.message)}</div>`;
+        return;
+      }
+      const cur = m.current || {};
+      const d = m.delta_pct || {};
+      const tiles = [
+        { label: "Requests", value: cur.requests ?? 0, delta: d.requests, higherIsBetter: true },
+        { label: "Avg latency", value: `${cur.avg_latency_ms ?? 0} ms`, delta: d.avg_latency_ms, higherIsBetter: false },
+        { label: "p95 latency", value: `${cur.p95_latency_ms ?? 0} ms`, delta: null, higherIsBetter: false },
+        { label: "Error rate", value: `${((cur.error_rate ?? 0) * 100).toFixed(1)}%`, delta: d.error_rate, higherIsBetter: false },
+      ];
+      const tileHtml = tiles.map(t => `
+        <div class="stat">
+          <div class="stat-label">${esc(t.label)}</div>
+          <div class="stat-row"><span class="stat-value">${esc(t.value)}</span>${deltaChip(t.delta, t.higherIsBetter)}</div>
+        </div>`).join("");
+      el.innerHTML = tileHtml + `<div class="spark"><div class="stat-label">Requests / 5 min</div>${sparkline(m.series)}</div>`;
+    }
     function renderEndpoints() {
       const el = $("endpoints");
       if (!el) return;
@@ -1551,6 +1643,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       renderRoutes();
       renderSnippets();
       renderAudit();
+      renderTraffic();
       setStatus(`Connected: ${health.service} ${health.version}`, "ok");
 
       // Secondary data loads in the background so the console paints immediately.

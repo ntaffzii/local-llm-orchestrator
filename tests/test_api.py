@@ -212,3 +212,26 @@ def test_admin_audit_records_config_changes(tmp_path, monkeypatch):
         main_module.AUDIT_LOG.clear()
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_admin_metrics_endpoint(tmp_path, monkeypatch):
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="k", admin_api_key="", model_config_path=temp_config),
+    )
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    try:
+        response = client.get("/admin/metrics", headers={"Authorization": "Bearer k"})
+        assert response.status_code == 200
+        body = response.json()
+        assert "current" in body and "delta_pct" in body and "series" in body
+        # Admin auth required.
+        assert TestClient(main_module.app).get("/admin/metrics").status_code == 401
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()

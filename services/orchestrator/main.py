@@ -21,6 +21,7 @@ from .admin_ui import admin_ui_html
 from .config import get_settings, load_model_config, save_model_config, validate_model_config
 from .llama_client import ProviderClients
 from .mcp_client import McpClient
+from .metrics import MetricsStore
 from .prompt_service import improve_prompt
 from .registry import ModelRegistry
 from .router import RequestRouter
@@ -43,6 +44,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("local_llm.orchestrator")
+
+# Paths whose latency/success feed the traffic metrics.
+INFERENCE_PATHS = {"/v1/chat/completions", "/orchestrate/chat", "/prompt/improve"}
+metrics_store = MetricsStore()
 
 
 def build_components(
@@ -123,6 +128,12 @@ async def request_context(request: Request, call_next):
         raise
     response.headers["X-Request-ID"] = request_id
     elapsed_ms = (time.perf_counter() - started) * 1000
+    if request.url.path in INFERENCE_PATHS:
+        metrics_store.record(
+            model=getattr(request.state, "metric_model", "unknown"),
+            latency_ms=elapsed_ms,
+            ok=response.status_code < 400,
+        )
     logger.info(
         "request_complete id=%s method=%s path=%s status=%s elapsed_ms=%.1f",
         request_id,
@@ -350,7 +361,8 @@ async def models(_: None = Depends(require_api_key)) -> dict[str, Any]:
 
 
 @app.post("/v1/chat/completions")
-async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
+async def chat(request: ChatRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
+    http_request.state.metric_model = request.model
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -381,7 +393,8 @@ async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
 
 
 @app.post("/prompt/improve")
-async def improve(request: ImprovePromptRequest, _: None = Depends(require_api_key)) -> dict[str, Any]:
+async def improve(request: ImprovePromptRequest, http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    http_request.state.metric_model = request.model
     try:
         selection = registry.selection(request.model)
         improved = await improve_prompt(
@@ -411,7 +424,8 @@ async def consult(request: ConsultPromptRequest, _: None = Depends(require_api_k
 
 
 @app.post("/orchestrate/chat")
-async def orchestrate(request: OrchestrateRequest, _: None = Depends(require_api_key)) -> Any:
+async def orchestrate(request: OrchestrateRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
+    http_request.state.metric_model = request.model
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -491,6 +505,11 @@ async def admin_config(_: None = Depends(require_admin_api_key)) -> dict[str, An
 @app.get("/admin/audit")
 async def admin_audit_log(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     return {"entries": list(AUDIT_LOG)}
+
+
+@app.get("/admin/metrics")
+async def admin_metrics(window_seconds: float = 3600.0, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return metrics_store.summary(window_seconds=window_seconds)
 
 
 @app.post("/admin/config/virtual-model")
