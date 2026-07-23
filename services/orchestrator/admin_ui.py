@@ -1624,8 +1624,8 @@ def admin_ui_html() -> str:
       const cfg = state.config || {};
       const providers = cfg.providers || {};
       const models = cfg.models || {};
-      const llamaReady = state.ready?.status === "ready";
-      const llamaDown = state.ready?.status === "unavailable";
+      const ready = state.ready;
+      const health = ready?.providers || {};
       const gatewaySvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="19.5" cy="18" r="2"/><path d="M6.5 12h5M11.5 12l6-6M11.5 12l6 6"/></svg>`;
       const providerRows = Object.keys(providers).map(name => {
         const modelChips = Object.entries(models)
@@ -1633,11 +1633,8 @@ def admin_ui_html() -> str:
           .map(([id]) => chip(id))
           .join("");
         let dot = "muted", label = "configured";
-        if (name === "local") {
-          if (llamaReady) { dot = "ok"; label = "reachable"; }
-          else if (llamaDown) { dot = "down"; label = "unreachable"; }
-          else { dot = "muted"; label = "checking"; }
-        }
+        if (!ready) { dot = "muted"; label = "checking"; }
+        else if (health[name]) { dot = health[name].ok ? "ok" : "down"; label = health[name].ok ? "reachable" : "unreachable"; }
         return `<div class="ep-provider">
           <span class="dot ${dot}"></span>
           <span class="ep-name">${esc(name)}</span>

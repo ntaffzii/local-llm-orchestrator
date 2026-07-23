@@ -3,9 +3,27 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 import os
+import re
 from typing import Any
 
 import httpx
+
+
+_ENV_REF = re.compile(r"^\$\{(\w+)\}$")
+
+
+def resolve_base_url(raw: str | None, default: str) -> str:
+    """Resolve a provider base_url, expanding a ``${ENV_VAR}`` reference.
+
+    An unset or empty env var (or an empty literal) falls back to ``default`` so a
+    provider can point at a dedicated service in one deployment and transparently
+    reuse the shared router in another.
+    """
+    value = (raw or "").strip()
+    match = _ENV_REF.match(value)
+    if match:
+        return os.getenv(match.group(1), "").strip() or default
+    return value or default
 
 
 class LlamaClient:
@@ -44,6 +62,14 @@ class LlamaClient:
         assert last_error is not None
         raise last_error
 
+    async def ping(self, path: str = "/health", timeout: float = 2.0) -> Any:
+        # A single-attempt, short-timeout probe for readiness checks -- retries and the
+        # long request timeout make a health snapshot needlessly slow.
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(self._url(path), headers=self._headers())
+            response.raise_for_status()
+            return response.json()
+
     async def stream(self, path: str, payload: dict[str, Any]) -> AsyncIterator[bytes]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", self._url(path), json=payload, headers=self._headers()) as response:
@@ -75,7 +101,7 @@ class ProviderClients:
         provider_config.setdefault("local", {"base_url": default_base_url})
         self.clients = {
             name: LlamaClient(
-                details.get("base_url") or default_base_url,
+                resolve_base_url(details.get("base_url"), default_base_url),
                 timeout,
                 attempts=attempts,
                 backoff=backoff,
@@ -86,6 +112,9 @@ class ProviderClients:
 
     async def get_json(self, provider: str, path: str) -> Any:
         return await self._client(provider).get_json(path)
+
+    async def ping(self, provider: str, timeout: float = 2.0) -> Any:
+        return await self._client(provider).ping(timeout=timeout)
 
     async def post_json(self, provider: str, path: str, payload: dict[str, Any]) -> Any:
         return await self._client(provider).post_json(path, payload)

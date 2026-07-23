@@ -393,3 +393,27 @@ def test_api_key_tools_scope_enforced(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_ready_reports_per_provider_health(monkeypatch):
+    from services.orchestrator.llama_client import ProviderClients
+
+    # Fast-failing client (closed port, no retries) so the probe returns immediately.
+    fast = ProviderClients(
+        main_module.model_config.get("providers", {}),
+        timeout=0.2,
+        attempts=1,
+        backoff=0.0,
+        default_base_url="http://127.0.0.1:59999",
+    )
+    monkeypatch.setattr(main_module, "provider_clients", fast)
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {main_module.settings.api_key}"}
+    response = client.get("/ready", headers=headers)
+    # No backend running: 200 with a per-provider health map and an overall status.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] in {"ready", "unavailable"}
+    assert "providers" in body and isinstance(body["providers"], dict)
+    # Referenced providers include the dedicated main/prompt providers.
+    assert "main" in body["providers"] and "prompt" in body["providers"]

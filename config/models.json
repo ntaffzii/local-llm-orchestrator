@@ -5,6 +5,16 @@
       "base_url": "",
       "api_key_env": ""
     },
+    "main": {
+      "type": "openai-compatible",
+      "base_url": "${LLAMA_MAIN_URL}",
+      "api_key_env": ""
+    },
+    "prompt": {
+      "type": "openai-compatible",
+      "base_url": "${LLAMA_PROMPT_URL}",
+      "api_key_env": ""
+    },
     "lmstudio": {
       "type": "openai-compatible",
       "base_url": "http://127.0.0.1:1234/v1",
@@ -19,7 +29,7 @@
   "models": {
     "lfm2.5-prompt": {
       "display_name": "LFM2.5 Prompt Improver",
-      "provider": "local",
+      "provider": "prompt",
       "capabilities": [
         "chat",
         "prompt-improvement"
@@ -39,7 +49,7 @@
     },
     "gemma4-e2b": {
       "display_name": "Main LLM (Gemma4 E2B)",
-      "provider": "local",
+      "provider": "main",
       "capabilities": [
         "chat",
         "reasoning",
@@ -127,13 +137,13 @@
       "tools": "auto"
     },
     "main-llm": {
-      "provider": "local",
+      "provider": "main",
       "model": "gemma4-e2b",
       "improve_prompt": false,
       "tools": false
     },
     "main-llm-improved": {
-      "provider": "local",
+      "provider": "main",
       "model": "gemma4-e2b",
       "improve_prompt": true,
       "tools": false
@@ -169,13 +179,13 @@
       "tools": false
     },
     "prompt": {
-      "provider": "local",
+      "provider": "prompt",
       "model": "lfm2.5-prompt",
       "improve_prompt": false,
       "tools": false
     },
     "prompt-consultant": {
-      "provider": "local",
+      "provider": "prompt",
       "model": "lfm2.5-prompt",
       "improve_prompt": false,
       "tools": false
@@ -225,7 +235,7 @@
     ]
   },
   "prompt_improver": {
-    "provider": "local",
+    "provider": "prompt",
     "model": "prompt",
     "system_prompt": "You are a strict, conservative English prompt rewriter. Convert the user's request into a clear English prompt for another AI model. The output MUST be English only, even if the user writes in Thai or another language. Preserve the user's intent, facts, names, numbers, constraints, and technical terms. Do not invent concrete endpoint paths, URLs, authentication, database choices, frameworks, cloud providers, response fields, business rules, infrastructure, timestamps, sample data, or parameter names that the user did not provide. Do not ask for required parameters, example inputs, or example outputs as if they already exist. When details are missing, explicitly tell the final model to state assumptions first and use placeholders such as <endpoint>, <framework>, <status_field>, <auth_scheme>, <timestamp_source>, or <response_schema> instead of fabricating values. For coding/API tasks, ask the final model to provide a minimal implementation, a proposed response shape clearly marked as an assumption, status codes, error handling, and a small test example. Tell the final model not to use hard-coded fake dates or fake production values. Keep the rewritten prompt focused and practical. Do not answer the task. Do not write code. Return only the improved English prompt.",
     "temperature": 0.05,

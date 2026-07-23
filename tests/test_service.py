@@ -31,10 +31,10 @@ async def test_improved_virtual_model_rewrites_then_calls_main():
 
     assert response["choices"][0]["message"]["content"] == "done"
     prompt_call = client.post_json.await_args_list[0].args
-    assert prompt_call[0] == "local"
+    assert prompt_call[0] == "prompt"
     assert prompt_call[2]["model"] == "lfm2.5-prompt"
     final_payload = client.post_json.await_args_list[1].args[2]
-    assert client.post_json.await_args_list[1].args[0] == "local"
+    assert client.post_json.await_args_list[1].args[0] == "main"
     assert final_payload["model"] == "gemma4-e2b"
     assert final_payload["messages"][-1]["content"].startswith("Write a documented")
 
@@ -150,7 +150,8 @@ async def test_virtual_model_can_use_remote_provider_after_local_prompt_rewrite(
     response = await service.orchestrate(request)
 
     assert response["choices"][0]["message"]["content"] == "remote answer"
-    assert client.post_json.await_args_list[0].args[0] == "local"
+    # The prompt rewrite runs on the dedicated prompt provider; the main answer is remote.
+    assert client.post_json.await_args_list[0].args[0] == "prompt"
     assert client.post_json.await_args_list[1].args[0] == "openrouter"
     assert client.post_json.await_args_list[1].args[2]["model"] == "openai/gpt-4.1-mini"
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -430,16 +431,43 @@ async def admin_ui() -> HTMLResponse:
     return HTMLResponse(admin_ui_html())
 
 
+def _referenced_providers() -> list[str]:
+    """Providers actually used by an enabled model, so /ready never probes unused
+    (possibly external) providers."""
+    names: set[str] = set()
+    for details in registry.models.values():
+        if details.get("enabled", True):
+            names.add(details.get("provider", "local"))
+    for policy in registry.virtual_models.values():
+        provider = policy.get("provider")
+        if provider and provider != "auto":
+            names.add(provider)
+    return [name for name in names if name in provider_clients.clients]
+
+
 @app.get("/ready")
 async def ready(_: None = Depends(require_api_key)) -> dict[str, Any]:
-    try:
-        upstream = await provider_clients.get_json("local", "/health")
-        return {"status": "ready", "llama_cpp": upstream, "mcp_enabled": mcp_client.enabled}
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "llama_unavailable", "message": str(exc)},
-        ) from exc
+    async def probe(name: str) -> tuple[str, dict[str, Any]]:
+        try:
+            detail = await provider_clients.ping(name)
+            return name, {"ok": True, "detail": detail}
+        except Exception as exc:
+            return name, {"ok": False, "error": str(exc)}
+
+    # Probe every referenced provider in parallel with a short timeout so readiness
+    # stays fast regardless of how many providers are configured or down.
+    providers_health: dict[str, Any] = dict(
+        await asyncio.gather(*(probe(name) for name in _referenced_providers()))
+    )
+    default_provider = registry.selection(registry.config["routing"]["default_model"]).provider
+    status = "ready" if providers_health.get(default_provider, {}).get("ok") else "unavailable"
+    return {
+        "status": status,
+        "providers": providers_health,
+        "mcp_enabled": mcp_client.enabled,
+        "llama_cpp": providers_health.get(default_provider, {}).get("detail")
+        or providers_health.get("local", {}).get("detail"),
+    }
 
 
 @app.get("/v1/models")
