@@ -1151,14 +1151,14 @@ def admin_ui_html() -> str:
           </section>
           <section>
             <div class="section-head">
-              <h2>cURL</h2>
+              <h2>cURL <span class="hint">bash / curl.exe</span></h2>
               <button id="copyCurlBtn" class="secondary">Copy</button>
             </div>
             <pre id="curlSnippet"></pre>
           </section>
           <section>
             <div class="section-head">
-              <h2>PowerShell</h2>
+              <h2>PowerShell <span class="hint">Windows</span></h2>
               <button id="copyPsBtn" class="secondary">Copy</button>
             </div>
             <pre id="psSnippet"></pre>
@@ -1783,9 +1783,11 @@ def admin_ui_html() -> str:
   -H "Authorization: Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(sample)}'`;
-      $("psSnippet").textContent = `$headers = @{ Authorization = "Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}"; "Content-Type" = "application/json" }
-$body = ${JSON.stringify(sample, null, 2)} | ConvertTo-Json -Depth 10
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" -Headers $headers -Body $body`;
+      $("psSnippet").textContent = `$headers = @{ Authorization = "Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}" }
+$body = @'
+${JSON.stringify(sample)}
+'@
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" -Headers $headers -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body))`;
     }
     function markFieldError(id, on) {
       const el = $(id);
