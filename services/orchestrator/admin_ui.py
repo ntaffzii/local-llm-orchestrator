@@ -443,7 +443,7 @@ def admin_ui_html() -> str:
     .tr.models { grid-template-columns: 190px 150px minmax(180px, 1fr) 96px; }
     .tr.providers { grid-template-columns: 140px minmax(230px, 1fr) 150px; }
     .tr.audit { grid-template-columns: 160px 150px minmax(180px, 1fr) 120px; }
-    .tr.keys { grid-template-columns: minmax(120px, 1fr) 160px 140px 140px 92px; }
+    .tr.keys { grid-template-columns: minmax(120px, 1.2fr) minmax(90px, 1fr) 72px 84px 130px 92px; }
     .key-code {
       display: flex;
       flex-wrap: wrap;
@@ -1171,19 +1171,25 @@ def admin_ui_html() -> str:
               <h2>API Keys</h2>
               <span class="hint">Issue inference keys to other people; revoke any time</span>
             </div>
-            <div class="row">
+            <div class="row three">
               <div>
                 <label for="newKeyLabel">Label</label>
                 <input id="newKeyLabel" maxlength="80" placeholder="team-member-a">
               </div>
-              <div style="display:flex; align-items:flex-end;">
-                <div class="actions" style="margin-top:0">
-                  <button id="createKeyBtn">Create key</button>
-                </div>
+              <div>
+                <label for="newKeyModels">Allowed models</label>
+                <input id="newKeyModels" placeholder="empty = all · e.g. main-llm, coding">
+              </div>
+              <div>
+                <label for="newKeyRate">Rate limit / min</label>
+                <input id="newKeyRate" type="number" min="0" step="1" value="0" placeholder="0 = unlimited">
               </div>
             </div>
+            <div class="actions">
+              <button id="createKeyBtn">Create key</button>
+            </div>
             <div id="newKeyReveal" class="status" style="display:none"></div>
-            <div class="hint" style="margin-top:8px">Keys grant inference access only, never admin. The full key is shown once and stored as a hash.</div>
+            <div class="hint" style="margin-top:8px">Keys grant inference access only, never admin. Scope limits which models the key may call. The full key is shown once and stored as a hash.</div>
           </section>
           <section>
             <div class="section-head">
@@ -1468,13 +1474,15 @@ def admin_ui_html() -> str:
       const table = $("apiKeys");
       if (!table) return;
       let keys = [];
+      let byKey = {};
       try {
         keys = (await api("/admin/api-keys", { admin: true })).keys || [];
       } catch (err) {
         table.innerHTML = `<div class="status err">Could not load keys: ${esc(err.message)}</div>`;
         return;
       }
-      table.innerHTML = `<div class="tr keys th"><span>Label</span><span>Prefix</span><span>Created</span><span>Last used</span><span>Action</span></div>`;
+      try { byKey = (await api("/admin/metrics", { admin: true })).by_key || {}; } catch { byKey = {}; }
+      table.innerHTML = `<div class="tr keys th"><span>Label</span><span>Scope</span><span>Rate</span><span>Req 1h</span><span>Last used</span><span>Action</span></div>`;
       const active = keys.filter(k => !k.revoked);
       if (!active.length) {
         const empty = document.createElement("div");
@@ -1484,12 +1492,17 @@ def admin_ui_html() -> str:
         return;
       }
       for (const k of active) {
+        const scopeModels = (k.scopes && k.scopes.models) || [];
+        const scopeText = scopeModels.length ? scopeModels.join(", ") : "all models";
+        const rateText = k.rate_limit_per_min ? `${k.rate_limit_per_min}/min` : "∞";
+        const reqCount = byKey[k.label] || 0;
         const row = document.createElement("div");
         row.className = "tr keys";
         row.innerHTML = `
-          <div class="td" data-label="Label"><span class="badge">${esc(k.label)}</span></div>
-          <div class="td" data-label="Prefix"><code style="font-size:12px">${esc(k.prefix)}…</code></div>
-          <div class="td" data-label="Created">${esc(fmtTime(k.created_at))}</div>
+          <div class="td" data-label="Label"><span class="badge">${esc(k.label)}</span> <code style="font-size:11px">${esc(k.prefix)}…</code></div>
+          <div class="td" data-label="Scope">${esc(scopeText)}</div>
+          <div class="td" data-label="Rate">${esc(rateText)}</div>
+          <div class="td" data-label="Req 1h">${esc(reqCount)}</div>
           <div class="td" data-label="Last used">${esc(k.last_used_at ? fmtTime(k.last_used_at) : "never")}</div>
           <div class="td" data-label="Action"><button class="ghost toggle-btn" data-id="${esc(k.id)}">Revoke</button></div>
         `;
@@ -1499,8 +1512,13 @@ def admin_ui_html() -> str:
     }
     async function createKey() {
       const label = $("newKeyLabel").value.trim() || "unnamed";
+      const models = $("newKeyModels").value.split(",").map(x => x.trim()).filter(Boolean);
+      const rate = Number($("newKeyRate").value || 0);
       setStatus("Creating key...");
-      const data = await api("/admin/api-keys", { method: "POST", admin: true, body: JSON.stringify({ label }) });
+      const data = await api("/admin/api-keys", {
+        method: "POST", admin: true,
+        body: JSON.stringify({ label, models, rate_limit_per_min: rate })
+      });
       const reveal = $("newKeyReveal");
       reveal.style.display = "block";
       reveal.className = "status ok";
@@ -1508,6 +1526,8 @@ def admin_ui_html() -> str:
         <div class="key-code"><code id="newKeyValue">${esc(data.key)}</code><button id="copyNewKeyBtn" class="secondary">Copy</button></div>`;
       $("copyNewKeyBtn").addEventListener("click", () => copyText(data.key));
       $("newKeyLabel").value = "";
+      $("newKeyModels").value = "";
+      $("newKeyRate").value = "0";
       await renderApiKeys();
       renderAudit();
       setStatus(`Key "${esc(data.record.label)}" created.`, "ok");

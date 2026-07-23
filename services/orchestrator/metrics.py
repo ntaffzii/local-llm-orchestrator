@@ -17,9 +17,15 @@ class MetricsStore:
     def __init__(self, maxlen: int = 5000) -> None:
         self.events: deque[dict[str, Any]] = deque(maxlen=maxlen)
 
-    def record(self, *, model: str, latency_ms: float, ok: bool) -> None:
+    def record(self, *, model: str, latency_ms: float, ok: bool, key: str = "anonymous") -> None:
         self.events.appendleft(
-            {"at": time.time(), "model": str(model or "unknown"), "latency_ms": float(latency_ms), "ok": bool(ok)}
+            {
+                "at": time.time(),
+                "model": str(model or "unknown"),
+                "key": str(key or "anonymous"),
+                "latency_ms": float(latency_ms),
+                "ok": bool(ok),
+            }
         )
 
     @staticmethod
@@ -57,8 +63,10 @@ class MetricsStore:
         previous = self._aggregate(previous_events)
 
         by_model: dict[str, int] = {}
+        by_key: dict[str, int] = {}
         for event in current_events:
             by_model[event["model"]] = by_model.get(event["model"], 0) + 1
+            by_key[event.get("key", "anonymous")] = by_key.get(event.get("key", "anonymous"), 0) + 1
 
         series = [0] * buckets
         bucket_seconds = window_seconds / buckets
@@ -78,5 +86,6 @@ class MetricsStore:
                 "error_rate": self._delta_pct(current["error_rate"], previous["error_rate"]),
             },
             "by_model": dict(sorted(by_model.items(), key=lambda item: item[1], reverse=True)),
+            "by_key": dict(sorted(by_key.items(), key=lambda item: item[1], reverse=True)),
             "series": series,
         }

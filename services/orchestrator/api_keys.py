@@ -16,7 +16,6 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-_PUBLIC_FIELDS = ("id", "label", "prefix", "created_at", "last_used_at", "revoked")
 
 
 class ApiKeyStore:
@@ -47,7 +46,12 @@ class ApiKeyStore:
     def has_keys(self) -> bool:
         return any(not key["revoked"] for key in self._keys)
 
-    def create(self, label: str) -> tuple[dict[str, Any], str]:
+    def create(
+        self,
+        label: str,
+        models: list[str] | None = None,
+        rate_limit_per_min: int = 0,
+    ) -> tuple[dict[str, Any], str]:
         key_id = secrets.token_hex(4)
         raw = f"llmk_{key_id}_{secrets.token_urlsafe(32)}"
         record = {
@@ -58,6 +62,9 @@ class ApiKeyStore:
             "created_at": time.time(),
             "last_used_at": None,
             "revoked": False,
+            # scopes.models is an allowlist of client-facing model names; empty = all.
+            "scopes": {"models": [m.strip() for m in (models or []) if m.strip()]},
+            "rate_limit_per_min": max(0, int(rate_limit_per_min or 0)),
         }
         self._keys.append(record)
         self._save()
@@ -88,4 +95,14 @@ class ApiKeyStore:
 
     @staticmethod
     def _public(key: dict[str, Any]) -> dict[str, Any]:
-        return {field: key[field] for field in _PUBLIC_FIELDS}
+        # Never includes the hash. Tolerant of records written before scopes existed.
+        return {
+            "id": key["id"],
+            "label": key["label"],
+            "prefix": key["prefix"],
+            "created_at": key["created_at"],
+            "last_used_at": key.get("last_used_at"),
+            "revoked": key["revoked"],
+            "scopes": key.get("scopes") or {"models": []},
+            "rate_limit_per_min": int(key.get("rate_limit_per_min", 0) or 0),
+        }

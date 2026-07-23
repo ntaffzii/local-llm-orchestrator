@@ -309,3 +309,54 @@ def test_api_key_lifecycle_and_managed_key_auth(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_api_key_scope_and_rate_limit(tmp_path, monkeypatch):
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="root", admin_api_key="admin", model_config_path=temp_config),
+    )
+    monkeypatch.setattr(main_module, "api_key_store", ApiKeyStore(tmp_path / "api_keys.json"))
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    admin = {"Authorization": "Bearer admin"}
+    try:
+        created = client.post(
+            "/admin/api-keys",
+            headers=admin,
+            json={"label": "scoped", "models": ["main-llm"], "rate_limit_per_min": 2},
+        )
+        assert created.status_code == 200
+        raw = created.json()["key"]
+        key_headers = {"Authorization": f"Bearer {raw}", "Content-Type": "application/json"}
+
+        # /v1/models is filtered to the allowed model for this key.
+        model_ids = {m["id"] for m in client.get("/v1/models", headers=key_headers).json()["data"]}
+        assert model_ids == {"main-llm"}
+
+        # A disallowed model is rejected with 403 before reaching the backend.
+        forbidden = client.post(
+            "/v1/chat/completions",
+            headers=key_headers,
+            json={"model": "coding", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["detail"]["code"] == "model_forbidden"
+
+        # Rate limit: /v1/models counts as a request; the 2/min key trips on the 3rd.
+        main_module.rate_limiter.reset()
+        statuses = [client.get("/v1/models", headers=key_headers).status_code for _ in range(3)]
+        assert statuses[0] == 200 and statuses[-1] == 429
+
+        # Metrics attribute traffic to the key label.
+        summary = client.get("/admin/metrics", headers=admin).json()
+        assert "by_key" in summary
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()

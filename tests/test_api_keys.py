@@ -35,3 +35,12 @@ def test_revoke_disables_key_and_persists(tmp_path):
 def test_revoke_unknown_returns_false(tmp_path):
     store = ApiKeyStore(tmp_path / "api_keys.json")
     assert store.revoke("nope") is False
+
+
+def test_create_stores_scopes_and_rate_limit(tmp_path):
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    record, _ = store.create("scoped", models=["main-llm", " coding "], rate_limit_per_min=5)
+    assert record["scopes"]["models"] == ["main-llm", "coding"]
+    assert record["rate_limit_per_min"] == 5
+    # Reloading preserves scopes.
+    assert ApiKeyStore(tmp_path / "api_keys.json").list()[0]["scopes"]["models"] == ["main-llm", "coding"]

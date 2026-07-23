@@ -140,6 +140,7 @@ async def request_context(request: Request, call_next):
             model=getattr(request.state, "metric_model", "unknown"),
             latency_ms=elapsed_ms,
             ok=response.status_code < 400,
+            key=getattr(request.state, "api_key_label", "anonymous"),
         )
     logger.info(
         "request_complete id=%s method=%s path=%s status=%s elapsed_ms=%.1f",
@@ -196,6 +197,32 @@ class AuthThrottle:
 auth_throttle = AuthThrottle()
 
 
+class RateLimiter:
+    """Per-key sliding-window request limiter (requests per minute). In-process."""
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key_id: str, limit_per_min: int) -> bool:
+        if not limit_per_min or limit_per_min <= 0:
+            return True
+        now = time.time()
+        window = self._hits.setdefault(key_id, deque())
+        cutoff = now - 60.0
+        while window and window[0] < cutoff:
+            window.popleft()
+        if len(window) >= limit_per_min:
+            return False
+        window.append(now)
+        return True
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+rate_limiter = RateLimiter()
+
+
 def _client_ip(request: Request) -> str:
     if settings.trust_forwarded_for:
         forwarded = request.headers.get("X-Forwarded-For")
@@ -227,12 +254,19 @@ def require_api_key(request: Request, authorization: str | None = Header(default
     if token:
         if settings.api_key and secrets.compare_digest(token, settings.api_key):
             request.state.api_key_label = "root"
+            request.state.api_key = None  # root key is unrestricted
             auth_throttle.record_success(ip)
             return
         record = api_key_store.verify(token)
         if record is not None:
-            request.state.api_key_label = record["label"]
             auth_throttle.record_success(ip)
+            if not rate_limiter.allow(record["id"], record.get("rate_limit_per_min", 0)):
+                raise HTTPException(
+                    status_code=429,
+                    detail={"code": "rate_limited", "message": "Per-key request rate limit exceeded."},
+                )
+            request.state.api_key_label = record["label"]
+            request.state.api_key = record
             return
     auth_throttle.record_failure(ip)
     raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
@@ -255,6 +289,18 @@ def require_admin_api_key(request: Request, authorization: str | None = Header(d
         logger.warning("admin_auth_failed ip=%s path=%s", ip, request.url.path)
         raise HTTPException(status_code=401, detail={"code": "invalid_admin_api_key", "message": "Invalid admin API key"})
     auth_throttle.record_success(ip)
+
+
+def enforce_model_scope(http_request: Request, model: str) -> None:
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return  # root key / open mode is unrestricted
+    allowed = (record.get("scopes") or {}).get("models") or []
+    if allowed and model not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "model_forbidden", "message": f"This key cannot use model: {model}", "allowed": allowed},
+        )
 
 
 def upstream_error(exc: httpx.HTTPStatusError) -> HTTPException:
@@ -379,13 +425,19 @@ async def ready(_: None = Depends(require_api_key)) -> dict[str, Any]:
 
 
 @app.get("/v1/models")
-async def models(_: None = Depends(require_api_key)) -> dict[str, Any]:
-    return registry.openai_models()
+async def models(http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    catalog = registry.openai_models()
+    record = getattr(http_request.state, "api_key", None)
+    allowed = ((record or {}).get("scopes") or {}).get("models") if record else None
+    if allowed:
+        catalog = {**catalog, "data": [item for item in catalog["data"] if item["id"] in allowed]}
+    return catalog
 
 
 @app.post("/v1/chat/completions")
 async def chat(request: ChatRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
     http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -418,6 +470,7 @@ async def chat(request: ChatRequest, http_request: Request, _: None = Depends(re
 @app.post("/prompt/improve")
 async def improve(request: ImprovePromptRequest, http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
     http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         selection = registry.selection(request.model)
         improved = await improve_prompt(
@@ -449,6 +502,7 @@ async def consult(request: ConsultPromptRequest, _: None = Depends(require_api_k
 @app.post("/orchestrate/chat")
 async def orchestrate(request: OrchestrateRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
     http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -546,8 +600,17 @@ async def create_api_key(
     http_request: Request,
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
-    record, raw_key = api_key_store.create(request.label)
-    _audit(http_request, "create_api_key", key_id=record["id"], label=record["label"])
+    record, raw_key = api_key_store.create(
+        request.label, models=request.models, rate_limit_per_min=request.rate_limit_per_min
+    )
+    _audit(
+        http_request,
+        "create_api_key",
+        key_id=record["id"],
+        label=record["label"],
+        models=",".join(record["scopes"]["models"]) or "all",
+        rate=record["rate_limit_per_min"],
+    )
     # The raw key is returned exactly once; it is never stored or shown again.
     return {"key": raw_key, "record": record}
 

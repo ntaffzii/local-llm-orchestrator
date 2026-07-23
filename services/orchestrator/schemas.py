@@ -73,3 +73,5 @@ class PatchMcpToolsRequest(BaseModel):
 
 class CreateApiKeyRequest(BaseModel):
     label: str = Field(default="unnamed", max_length=80)
+    models: list[str] = Field(default_factory=list)
+    rate_limit_per_min: int = Field(default=0, ge=0)
