@@ -1151,14 +1151,21 @@ def admin_ui_html() -> str:
           </section>
           <section>
             <div class="section-head">
-              <h2>cURL <span class="hint">bash / curl.exe</span></h2>
+              <h2>Request body <span class="hint">save as request.json (UTF-8)</span></h2>
+              <button id="copyBodyBtn" class="secondary">Copy</button>
+            </div>
+            <pre id="bodySnippet"></pre>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>cURL <span class="hint">any shell — sends request.json</span></h2>
               <button id="copyCurlBtn" class="secondary">Copy</button>
             </div>
             <pre id="curlSnippet"></pre>
           </section>
           <section>
             <div class="section-head">
-              <h2>PowerShell <span class="hint">Windows</span></h2>
+              <h2>PowerShell <span class="hint">Windows, self-contained</span></h2>
               <button id="copyPsBtn" class="secondary">Copy</button>
             </div>
             <pre id="psSnippet"></pre>
@@ -1779,10 +1786,8 @@ def admin_ui_html() -> str:
         messages: [{ role: "user", content: "ช่วยเขียน api ง่ายๆ สำหรับเช็คสถานะ server" }],
         stream: false
       };
-      $("curlSnippet").textContent = `curl http://127.0.0.1:8090/v1/chat/completions \\
-  -H "Authorization: Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}" \\
-  -H "Content-Type: application/json" \\
-  -d '${JSON.stringify(sample)}'`;
+      $("bodySnippet").textContent = JSON.stringify(sample, null, 2);
+      $("curlSnippet").textContent = `curl http://127.0.0.1:8090/v1/chat/completions -H "Authorization: Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}" -H "Content-Type: application/json" -d "@request.json"`;
       $("psSnippet").textContent = `$headers = @{ Authorization = "Bearer ${key() || "<ORCHESTRATOR_API_KEY>"}" }
 $body = @'
 ${JSON.stringify(sample)}
@@ -2020,6 +2025,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("runPlayBtn").addEventListener("click", runPlayground);
     $("copyPlayBtn").addEventListener("click", () => copyText(pretty(playgroundPayload())));
     $("copyRouteBtn").addEventListener("click", () => copyText(pretty(state.config?.virtual_models?.[$("virtualModel").value] || {})));
+    $("copyBodyBtn").addEventListener("click", () => copyText($("bodySnippet").textContent));
     $("copyCurlBtn").addEventListener("click", () => copyText($("curlSnippet").textContent));
     $("copyPsBtn").addEventListener("click", () => copyText($("psSnippet").textContent));
     $("apiKey").addEventListener("input", () => markFieldError("apiKey", false));
