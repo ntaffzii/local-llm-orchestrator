@@ -551,6 +551,67 @@ def admin_ui_html() -> str:
     .chip.accent { border-color: var(--accent); color: var(--accent); }
     @media (max-width: 900px) { .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 560px) { .pipeline { grid-template-columns: 1fr; } .stage:not(:last-child)::after { display: none; } }
+    .tab-ico { display: inline-flex; }
+    .tab-ico svg { width: 17px; height: 17px; }
+    .m-ico { display: inline-flex; color: var(--accent); }
+    .m-ico svg { width: 15px; height: 15px; }
+    .metric-title { display: flex; align-items: center; gap: 6px; }
+    .endpoints {
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+    }
+    .ep-node {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-soft);
+      padding: 11px 13px;
+      display: grid;
+      gap: 3px;
+      min-width: 120px;
+    }
+    .ep-node.gateway { border-color: var(--accent); background: var(--accent-soft); }
+    .ep-name { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13px; }
+    .ep-name svg { width: 15px; height: 15px; color: var(--accent); }
+    .ep-sub { color: var(--muted); font-size: 12px; }
+    .ep-arrow {
+      width: 26px;
+      height: 1px;
+      background: linear-gradient(90deg, var(--line), var(--accent));
+      position: relative;
+    }
+    .ep-arrow::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: -3px;
+      border: 3px solid transparent;
+      border-left-color: var(--accent);
+    }
+    .ep-providers { display: grid; gap: 8px; }
+    .ep-provider {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 10px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      transition: border-color 0.15s ease;
+    }
+    .ep-provider:hover { border-color: var(--accent); }
+    .ep-models { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .dot.ok { background: var(--ok); }
+    .dot.down { background: var(--danger); }
+    .dot.muted { background: var(--muted); }
+    @media (max-width: 760px) {
+      .endpoints { grid-template-columns: 1fr; }
+      .ep-arrow { display: none; }
+      .ep-models { margin-left: 0; }
+    }
     .api-key-box {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
@@ -592,7 +653,15 @@ def admin_ui_html() -> str:
   <header>
     <div class="wrap topbar">
       <div class="brand">
-        <div class="mark">LO</div>
+        <div class="mark" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="4.5" cy="12" r="2.1"/>
+            <circle cx="19.5" cy="5" r="2.1"/>
+            <circle cx="19.5" cy="12" r="2.1"/>
+            <circle cx="19.5" cy="19" r="2.1"/>
+            <path d="M6.6 12h4.4M11 12l6.4-6.4M11 12h6.4M11 12l6.4 6.4"/>
+          </svg>
+        </div>
         <div>
           <h1>Local LLM Orchestrator</h1>
           <div class="subtitle">OpenAI-compatible gateway for local llama.cpp models — routing, prompt improvement, and MCP tools</div>
@@ -625,33 +694,38 @@ def admin_ui_html() -> str:
           </div>
         </section>
         <nav class="panel tabs" aria-label="Console sections" role="tablist">
-          <button class="tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="overview">Overview</button>
-          <button class="tab" data-view="routing" role="tab" aria-selected="false" aria-controls="routing" tabindex="-1">Routing</button>
-          <button class="tab" data-view="playground" role="tab" aria-selected="false" aria-controls="playground" tabindex="-1">Playground</button>
-          <button class="tab" data-view="tools" role="tab" aria-selected="false" aria-controls="tools" tabindex="-1">Tools</button>
-          <button class="tab" data-view="api" role="tab" aria-selected="false" aria-controls="api" tabindex="-1">API</button>
+          <button class="tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="overview">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>Overview</button>
+          <button class="tab" data-view="routing" role="tab" aria-selected="false" aria-controls="routing" tabindex="-1">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="12" r="2.4"/><path d="M8.4 6H13a2.6 2.6 0 0 1 2.6 2.6v.9M8.4 18H13a2.6 2.6 0 0 0 2.6-2.6v-.9"/></svg></span>Routing</button>
+          <button class="tab" data-view="playground" role="tab" aria-selected="false" aria-controls="playground" tabindex="-1">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5.5v13l11-6.5-11-6.5Z"/></svg></span>Playground</button>
+          <button class="tab" data-view="tools" role="tab" aria-selected="false" aria-controls="tools" tabindex="-1">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M8 8h8v3a4 4 0 0 1-8 0V8ZM12 15v6"/></svg></span>Tools</button>
+          <button class="tab" data-view="api" role="tab" aria-selected="false" aria-controls="api" tabindex="-1">
+            <span class="tab-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg></span>API</button>
         </nav>
       </aside>
 
       <div class="content">
         <div class="quick">
           <section class="metric">
-            <div class="metric-title">Orchestrator</div>
+            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>Orchestrator</div>
             <div class="metric-value" id="metricApi">--</div>
             <div class="metric-note" id="metricApiNote">/health</div>
           </section>
           <section class="metric">
-            <div class="metric-title">llama.cpp</div>
+            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v2M14 3v2M10 19v2M14 19v2M3 10h2M3 14h2M19 10h2M19 14h2"/></svg></span>llama.cpp</div>
             <div class="metric-value" id="metricLlama">--</div>
             <div class="metric-note" id="metricLlamaNote">/ready</div>
           </section>
           <section class="metric">
-            <div class="metric-title">Models</div>
+            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5-8 4.5-8-4.5L12 3ZM4 12l8 4.5L20 12M4 16.5L12 21l8-4.5"/></svg></span>Models</div>
             <div class="metric-value" id="metricModels">--</div>
             <div class="metric-note" id="metricModelsNote">physical + virtual</div>
           </section>
           <section class="metric">
-            <div class="metric-title">MCP</div>
+            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M8 8h8v3a4 4 0 0 1-8 0V8ZM12 15v6"/></svg></span>MCP</div>
             <div class="metric-value" id="metricMcp">--</div>
             <div class="metric-note" id="metricMcpNote">tool allowlist</div>
           </section>
@@ -664,6 +738,13 @@ def admin_ui_html() -> str:
               <span class="hint">Request path from client to model</span>
             </div>
             <div id="pipeline" class="pipeline"></div>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>Endpoint Health</h2>
+              <span class="hint">Gateway to provider routing and reachability</span>
+            </div>
+            <div id="endpoints" class="endpoints"></div>
           </section>
           <section>
             <div class="section-head">
@@ -1097,6 +1178,41 @@ def admin_ui_html() -> str:
           ${stage.rows.map(row => `<div class="stage-row"><span class="k">${esc(row[0])}</span>${row[1]}</div>`).join("")}
         </div>`).join("");
     }
+    function renderEndpoints() {
+      const el = $("endpoints");
+      if (!el) return;
+      const cfg = state.config || {};
+      const providers = cfg.providers || {};
+      const models = cfg.models || {};
+      const llamaReady = state.ready?.status === "ready";
+      const llamaDown = state.ready?.status === "unavailable";
+      const gatewaySvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="2"/><circle cx="19.5" cy="6" r="2"/><circle cx="19.5" cy="18" r="2"/><path d="M6.5 12h5M11.5 12l6-6M11.5 12l6 6"/></svg>`;
+      const providerRows = Object.keys(providers).map(name => {
+        const modelChips = Object.entries(models)
+          .filter(([, m]) => (m.provider || "local") === name && m.enabled !== false)
+          .map(([id]) => chip(id))
+          .join("");
+        let dot = "muted", label = "configured";
+        if (name === "local") {
+          if (llamaReady) { dot = "ok"; label = "reachable"; }
+          else if (llamaDown) { dot = "down"; label = "unreachable"; }
+          else { dot = "muted"; label = "checking"; }
+        }
+        return `<div class="ep-provider">
+          <span class="dot ${dot}"></span>
+          <span class="ep-name">${esc(name)}</span>
+          <span class="chip ${dot === "ok" ? "on" : dot === "down" ? "off" : ""}">${esc(label)}</span>
+          <span class="ep-models">${modelChips || chip("no models", "off")}</span>
+        </div>`;
+      }).join("");
+      el.innerHTML = `
+        <div class="ep-node gateway">
+          <span class="ep-name">${gatewaySvg}Gateway</span>
+          <span class="ep-sub">127.0.0.1:8090 · /v1</span>
+        </div>
+        <div class="ep-arrow"></div>
+        <div class="ep-providers">${providerRows}</div>`;
+    }
     function renderProviders() {
       const providers = state.config?.providers || {};
       const table = $("providers");
@@ -1247,6 +1363,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
         state.ready = { status: "unavailable", error: err.message };
       }
       updateMetrics();
+      renderEndpoints();
       if (state.ready?.status !== "ready") {
         setStatus(`Connected. Note: llama.cpp is not reachable (${state.ready?.error || "unknown"}). Admin settings still work.`, "warn");
       }
@@ -1303,6 +1420,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       loadPlaygroundSelects();
       updateMetrics();
       renderPipeline();
+      renderEndpoints();
       renderProviders();
       renderModels();
       renderRoutes();
