@@ -5,6 +5,7 @@ import logging
 import secrets
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
@@ -455,6 +456,11 @@ async def call_mcp_tool(request: ToolCallRequest, _: None = Depends(require_api_
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
 
 
+# Recent admin config changes, newest first. In-memory only (resets on restart),
+# which is enough to power the console's activity view without a datastore.
+AUDIT_LOG: deque[dict[str, Any]] = deque(maxlen=200)
+
+
 def _audit(http_request: Request, action: str, **fields: Any) -> None:
     request_id = getattr(http_request.state, "request_id", "-")
     # Strip CR/LF from user-supplied values so a crafted model/provider name cannot
@@ -462,7 +468,11 @@ def _audit(http_request: Request, action: str, **fields: Any) -> None:
     def _clean(value: Any) -> str:
         return str(value).replace("\r", " ").replace("\n", " ")
 
-    extra = " ".join(f"{key}={_clean(value)}" for key, value in fields.items())
+    clean_fields = {key: _clean(value) for key, value in fields.items()}
+    AUDIT_LOG.appendleft(
+        {"id": request_id, "ip": _client_ip(http_request), "action": action, "fields": clean_fields, "at": time.time()}
+    )
+    extra = " ".join(f"{key}={value}" for key, value in clean_fields.items())
     logger.info("admin_audit id=%s ip=%s action=%s %s", request_id, _client_ip(http_request), action, extra)
 
 
@@ -476,6 +486,11 @@ async def reload_config(http_request: Request, _: None = Depends(require_admin_a
 @app.get("/admin/config")
 async def admin_config(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     return model_config
+
+
+@app.get("/admin/audit")
+async def admin_audit_log(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return {"entries": list(AUDIT_LOG)}
 
 
 @app.post("/admin/config/virtual-model")

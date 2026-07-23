@@ -442,6 +442,7 @@ def admin_ui_html() -> str:
     .tr.routes { grid-template-columns: 170px 120px minmax(180px, 1fr) 96px 86px; }
     .tr.models { grid-template-columns: 190px 150px minmax(180px, 1fr) 96px; }
     .tr.providers { grid-template-columns: 140px minmax(230px, 1fr) 150px; }
+    .tr.audit { grid-template-columns: 160px 150px minmax(180px, 1fr) 120px; }
     .th {
       background: var(--panel-soft);
       color: var(--muted);
@@ -555,7 +556,53 @@ def admin_ui_html() -> str:
     .tab-ico svg { width: 17px; height: 17px; }
     .m-ico { display: inline-flex; color: var(--accent); }
     .m-ico svg { width: 15px; height: 15px; }
-    .metric-title { display: flex; align-items: center; gap: 6px; }
+    .metric-title { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .metric-title .mt-left { display: inline-flex; align-items: center; gap: 6px; }
+    .metric-badge {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--panel-soft);
+      color: var(--muted);
+      border: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    .metric-badge.ok { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+    .metric-badge.err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
+    .metric-badge:empty { display: none; }
+    .content.disconnected .quick,
+    .content.disconnected .view { display: none; }
+    .content:not(.disconnected) #emptyState { display: none; }
+    .empty {
+      display: grid;
+      justify-items: center;
+      text-align: center;
+      gap: 12px;
+      padding: 56px 20px;
+    }
+    .empty-mark {
+      width: 64px;
+      height: 64px;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      background: linear-gradient(145deg, var(--accent), var(--accent-strong));
+      color: #fff;
+      box-shadow: 0 6px 20px rgba(11, 122, 117, 0.35);
+    }
+    .empty-mark svg { width: 34px; height: 34px; }
+    .empty h2 { font-size: 18px; }
+    .empty p { margin: 0; color: var(--muted); max-width: 420px; line-height: 1.5; }
+    .empty-hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .empty-hint svg { width: 16px; height: 16px; }
     .endpoints {
       display: grid;
       grid-template-columns: auto auto minmax(0, 1fr);
@@ -707,25 +754,42 @@ def admin_ui_html() -> str:
         </nav>
       </aside>
 
-      <div class="content">
+      <div class="content disconnected">
+        <section id="emptyState" class="empty">
+          <div class="empty-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="4.5" cy="12" r="2.1"/>
+              <circle cx="19.5" cy="5" r="2.1"/>
+              <circle cx="19.5" cy="12" r="2.1"/>
+              <circle cx="19.5" cy="19" r="2.1"/>
+              <path d="M6.6 12h4.4M11 12l6.4-6.4M11 12h6.4M11 12l6.4 6.4"/>
+            </svg>
+          </div>
+          <h2>Connect to your orchestrator</h2>
+          <p>Enter your API key above and click Connect to load the gateway pipeline, routing, models, and MCP tools. If a separate admin key is set, add it too.</p>
+          <span class="empty-hint">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+            Enter your key in the top bar
+          </span>
+        </section>
         <div class="quick">
           <section class="metric">
-            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>Orchestrator</div>
+            <div class="metric-title"><span class="mt-left"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>Orchestrator</span><span class="metric-badge" id="badgeApi"></span></div>
             <div class="metric-value" id="metricApi">--</div>
             <div class="metric-note" id="metricApiNote">/health</div>
           </section>
           <section class="metric">
-            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v2M14 3v2M10 19v2M14 19v2M3 10h2M3 14h2M19 10h2M19 14h2"/></svg></span>llama.cpp</div>
+            <div class="metric-title"><span class="mt-left"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v2M14 3v2M10 19v2M14 19v2M3 10h2M3 14h2M19 10h2M19 14h2"/></svg></span>llama.cpp</span><span class="metric-badge" id="badgeLlama"></span></div>
             <div class="metric-value" id="metricLlama">--</div>
             <div class="metric-note" id="metricLlamaNote">/ready</div>
           </section>
           <section class="metric">
-            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5-8 4.5-8-4.5L12 3ZM4 12l8 4.5L20 12M4 16.5L12 21l8-4.5"/></svg></span>Models</div>
+            <div class="metric-title"><span class="mt-left"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5-8 4.5-8-4.5L12 3ZM4 12l8 4.5L20 12M4 16.5L12 21l8-4.5"/></svg></span>Models</span><span class="metric-badge" id="badgeModels"></span></div>
             <div class="metric-value" id="metricModels">--</div>
             <div class="metric-note" id="metricModelsNote">physical + virtual</div>
           </section>
           <section class="metric">
-            <div class="metric-title"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M8 8h8v3a4 4 0 0 1-8 0V8ZM12 15v6"/></svg></span>MCP</div>
+            <div class="metric-title"><span class="mt-left"><span class="m-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5M8 8h8v3a4 4 0 0 1-8 0V8ZM12 15v6"/></svg></span>MCP</span><span class="metric-badge" id="badgeMcp"></span></div>
             <div class="metric-value" id="metricMcp">--</div>
             <div class="metric-note" id="metricMcpNote">tool allowlist</div>
           </section>
@@ -759,6 +823,13 @@ def admin_ui_html() -> str:
               <span class="hint">Physical and virtual model IDs exposed to OpenAI clients</span>
             </div>
             <div id="modelInventory" class="table"></div>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>Recent Activity</h2>
+              <span class="hint">Config changes made through the admin API (resets on restart)</span>
+            </div>
+            <div id="auditLog" class="table"></div>
           </section>
         </div>
 
@@ -1139,6 +1210,19 @@ def admin_ui_html() -> str:
       $("metricMcpNote").textContent = `${(mcp.tool_allowlist || []).length} allowed tools`;
       $("mcpState").textContent = mcp.enabled ? "enabled" : "disabled";
       $("mcpState").className = "badge " + (mcp.enabled ? "ok" : "muted");
+      // Honest status badges (real state, not fabricated trend deltas).
+      setBadge("badgeApi", "healthy", "ok");
+      if (state.ready?.status === "ready") setBadge("badgeLlama", "ready", "ok");
+      else if (state.ready?.status === "unavailable") setBadge("badgeLlama", "down", "err");
+      else setBadge("badgeLlama", "checking", "");
+      setBadge("badgeModels", `${virtualNames().length} virtual`, "");
+      setBadge("badgeMcp", mcp.enabled ? "on" : "off", mcp.enabled ? "ok" : "");
+    }
+    function setBadge(id, text, kind) {
+      const el = $(id);
+      if (!el) return;
+      el.textContent = text;
+      el.className = "metric-badge" + (kind ? " " + kind : "");
     }
     function renderPipeline() {
       const el = $("pipeline");
@@ -1177,6 +1261,46 @@ def admin_ui_html() -> str:
           <div class="stage-head"><span class="stage-num">${stage.n}</span><span class="stage-title">${esc(stage.title)}</span></div>
           ${stage.rows.map(row => `<div class="stage-row"><span class="k">${esc(row[0])}</span>${row[1]}</div>`).join("")}
         </div>`).join("");
+    }
+    function fmtTime(seconds) {
+      if (!seconds) return "-";
+      const d = new Date(seconds * 1000);
+      return d.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+    function fmtAuditFields(fields) {
+      const entries = Object.entries(fields || {});
+      if (!entries.length) return "-";
+      return entries.map(([k, v]) => `${k}=${v}`).join(", ");
+    }
+    async function renderAudit() {
+      const table = $("auditLog");
+      if (!table) return;
+      let entries = [];
+      try {
+        entries = (await api("/admin/audit", { admin: true })).entries || [];
+      } catch (err) {
+        table.innerHTML = `<div class="status">Could not load activity: ${esc(err.message)}</div>`;
+        return;
+      }
+      table.innerHTML = `<div class="tr audit th"><span>Time</span><span>Action</span><span>Details</span><span>By</span></div>`;
+      if (!entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "status";
+        empty.textContent = "No config changes recorded yet.";
+        table.appendChild(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const row = document.createElement("div");
+        row.className = "tr audit";
+        row.innerHTML = `
+          <div class="td" data-label="Time">${esc(fmtTime(entry.at))}</div>
+          <div class="td" data-label="Action"><span class="badge">${esc(entry.action || "-")}</span></div>
+          <div class="td" data-label="Details">${esc(fmtAuditFields(entry.fields))}</div>
+          <div class="td" data-label="By">${esc(entry.ip || "-")}</div>
+        `;
+        table.appendChild(row);
+      }
     }
     function renderEndpoints() {
       const el = $("endpoints");
@@ -1418,6 +1542,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       loadPromptForm();
       loadMcpForm();
       loadPlaygroundSelects();
+      document.querySelector(".content").classList.remove("disconnected");
       updateMetrics();
       renderPipeline();
       renderEndpoints();
@@ -1425,6 +1550,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       renderModels();
       renderRoutes();
       renderSnippets();
+      renderAudit();
       setStatus(`Connected: ${health.service} ${health.version}`, "ok");
 
       // Secondary data loads in the background so the console paints immediately.
@@ -1446,7 +1572,9 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       state.config = await api("/admin/config/virtual-model", { method: "POST", admin: true, body: JSON.stringify(body) });
       loadRouteForm();
       renderRoutes();
+      renderPipeline();
       updateMetrics();
+      renderAudit();
       setStatus("Route saved and reloaded.", "ok");
     }
     async function savePrompt() {

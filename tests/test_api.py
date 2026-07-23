@@ -184,3 +184,31 @@ def test_forwarded_for_is_ignored_unless_trusted(monkeypatch):
     monkeypatch.setattr(main_module, "settings", replace(original_settings, trust_forwarded_for=True))
     assert main_module._client_ip(_Req()) == "9.9.9.9"
     monkeypatch.setattr(main_module, "settings", original_settings)
+
+
+def test_admin_audit_records_config_changes(tmp_path, monkeypatch):
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="k", admin_api_key="", model_config_path=temp_config),
+    )
+    main_module.reload_components()
+    main_module.AUDIT_LOG.clear()
+    client = TestClient(main_module.app)
+    headers = {"Authorization": "Bearer k"}
+    try:
+        client.patch("/admin/mcp/tools", headers=headers, json={"enabled": True, "set_tools": ["route_request"]})
+        response = client.get("/admin/audit", headers=headers)
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+        assert entries and entries[0]["action"] == "patch_mcp_tools"
+        assert "at" in entries[0] and "ip" in entries[0]
+        # Audit requires admin auth.
+        assert TestClient(main_module.app).get("/admin/audit").status_code == 401
+    finally:
+        main_module.AUDIT_LOG.clear()
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
