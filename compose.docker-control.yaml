@@ -9,6 +9,12 @@
 # DOCKER_SOCKET at the proxy so only container start/stop is exposed.
 services:
   orchestrator:
+    # The image runs as the non-root "app" user, which cannot read the root-owned
+    # Docker socket. This overlay already grants host-root-equivalent access, so run
+    # this one container as root to reach the socket. (For a least-privilege setup,
+    # drop this and instead put a docker-socket-proxy in front, pointing DOCKER_SOCKET
+    # at the proxy.)
+    user: root
     environment:
       DOCKER_CONTROL_ENABLED: "true"
       DOCKER_COMPOSE_PROJECT: ${DOCKER_COMPOSE_PROJECT:-local-llm}
