@@ -478,6 +478,79 @@ def admin_ui_html() -> str:
     .output {
       min-height: 220px;
     }
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+    .stage {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-soft);
+      padding: 12px;
+      display: grid;
+      gap: 9px;
+      align-content: start;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .stage:hover { border-color: var(--accent); box-shadow: var(--shadow-hover); }
+    .stage:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -8px;
+      top: 24px;
+      width: 8px;
+      height: 1px;
+      background: var(--line);
+    }
+    .stage-head { display: flex; align-items: center; gap: 8px; }
+    .stage-num {
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      display: grid;
+      place-items: center;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .stage-title {
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+    }
+    .stage-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .stage-row .k { color: var(--muted); }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+      overflow-wrap: anywhere;
+    }
+    .chip.on { border-color: var(--ok); color: var(--ok); }
+    .chip.off { border-color: var(--line); color: var(--muted); }
+    .chip.accent { border-color: var(--accent); color: var(--accent); }
+    @media (max-width: 900px) { .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 560px) { .pipeline { grid-template-columns: 1fr; } .stage:not(:last-child)::after { display: none; } }
     .api-key-box {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
@@ -585,6 +658,13 @@ def admin_ui_html() -> str:
         </div>
 
         <div id="overview" class="view active">
+          <section>
+            <div class="section-head">
+              <h2>Gateway Pipeline</h2>
+              <span class="hint">Request path from client to model</span>
+            </div>
+            <div id="pipeline" class="pipeline"></div>
+          </section>
           <section>
             <div class="section-head">
               <h2>Provider Map</h2>
@@ -863,6 +943,12 @@ def admin_ui_html() -> str:
       el.className = "status" + (kind ? " " + kind : "");
     }
     function pretty(value) { return JSON.stringify(value, null, 2); }
+    function esc(value) {
+      return String(value).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+    function chip(text, kind) {
+      return `<span class="chip ${kind || ""}">${esc(text)}</span>`;
+    }
     function parsePolicy(value) {
       if (value === "true") return true;
       if (value === "false") return false;
@@ -972,6 +1058,44 @@ def admin_ui_html() -> str:
       $("metricMcpNote").textContent = `${(mcp.tool_allowlist || []).length} allowed tools`;
       $("mcpState").textContent = mcp.enabled ? "enabled" : "disabled";
       $("mcpState").className = "badge " + (mcp.enabled ? "ok" : "muted");
+    }
+    function renderPipeline() {
+      const el = $("pipeline");
+      if (!el) return;
+      const cfg = state.config || {};
+      const routing = cfg.routing || {};
+      const improver = cfg.prompt_improver || {};
+      const mcp = cfg.mcp || {};
+      const orchestration = cfg.orchestration || {};
+      const providerCount = Object.keys(cfg.providers || {}).length;
+      const llamaReady = state.ready?.status === "ready";
+      const stages = [
+        { n: "1", title: "Ingress", rows: [
+          ["Endpoint", chip("/v1/chat/completions", "accent")],
+          ["Auth", chip("API key", "on")],
+          ["Providers", chip(providerCount)],
+        ]},
+        { n: "2", title: "Prompt improve", rows: [
+          ["Model", chip(improver.model || "prompt", "accent")],
+          ["Provider", chip(improver.provider || "local")],
+          ["Temp", chip(improver.temperature ?? "default")],
+        ]},
+        { n: "3", title: "Router", rows: [
+          ["Default", chip(routing.default_model || "-", "accent")],
+          ["Coding", chip(routing.coding_model || "-")],
+          ["Vision", chip(routing.vision_model || "-")],
+        ]},
+        { n: "4", title: "MCP tools", rows: [
+          ["Status", mcp.enabled ? chip("enabled", "on") : chip("disabled", "off")],
+          ["Allowed", chip((mcp.tool_allowlist || []).length)],
+          ["Max rounds", chip(orchestration.max_tool_rounds ?? "-")],
+        ]},
+      ];
+      el.innerHTML = stages.map(stage => `
+        <div class="stage">
+          <div class="stage-head"><span class="stage-num">${stage.n}</span><span class="stage-title">${esc(stage.title)}</span></div>
+          ${stage.rows.map(row => `<div class="stage-row"><span class="k">${esc(row[0])}</span>${row[1]}</div>`).join("")}
+        </div>`).join("");
     }
     function renderProviders() {
       const providers = state.config?.providers || {};
@@ -1178,6 +1302,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       loadMcpForm();
       loadPlaygroundSelects();
       updateMetrics();
+      renderPipeline();
       renderProviders();
       renderModels();
       renderRoutes();
