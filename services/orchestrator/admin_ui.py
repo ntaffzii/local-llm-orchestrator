@@ -704,6 +704,20 @@ def admin_ui_html() -> str:
     .spark svg { width: 100%; height: 52px; }
     @media (max-width: 900px) { .traffic { grid-template-columns: repeat(2, minmax(0, 1fr)); } .spark { grid-column: 1 / -1; } }
     @media (max-width: 560px) { .traffic { grid-template-columns: 1fr; } }
+    .services { display: grid; gap: 8px; }
+    .service-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 10px 12px;
+    }
+    .service-name { font-weight: 700; font-size: 13px; }
+    .service-actions { margin-left: auto; display: flex; gap: 8px; }
+    .toggle-btn { min-height: 32px; padding: 5px 12px; }
     .api-key-box {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
@@ -854,6 +868,13 @@ def admin_ui_html() -> str:
               <span class="hint">Gateway to provider routing and reachability</span>
             </div>
             <div id="endpoints" class="endpoints"></div>
+          </section>
+          <section>
+            <div class="section-head">
+              <h2>Model Services</h2>
+              <span class="hint">Start/stop model containers (opt-in Docker control)</span>
+            </div>
+            <div id="services" class="services"></div>
           </section>
           <section>
             <div class="section-head">
@@ -1394,6 +1415,59 @@ def admin_ui_html() -> str:
         </div>`).join("");
       el.innerHTML = tileHtml + `<div class="spark"><div class="stat-label">Requests / 5 min</div>${sparkline(m.series)}</div>`;
     }
+    async function renderServices() {
+      const el = $("services");
+      if (!el) return;
+      let data;
+      try {
+        data = await api("/admin/services", { admin: true });
+      } catch (err) {
+        el.innerHTML = `<div class="status err">Could not load services: ${esc(err.message)}</div>`;
+        return;
+      }
+      if (!data.enabled) {
+        el.innerHTML = `<div class="status">Docker control is disabled. Enable the compose.docker-control.yaml overlay and set DOCKER_CONTROL_ENABLED=true to start/stop model containers here.</div>`;
+        return;
+      }
+      if (data.error) {
+        el.innerHTML = `<div class="status err">Docker unavailable: ${esc(data.error)}</div>`;
+        return;
+      }
+      el.innerHTML = "";
+      for (const svc of data.services || []) {
+        const running = !!svc.running;
+        const dotKind = running ? "ok" : (svc.exists ? "down" : "muted");
+        const stateText = running ? "running" : (svc.exists ? "stopped" : "not created");
+        const row = document.createElement("div");
+        row.className = "service-row";
+        row.innerHTML = `
+          <span class="dot ${dotKind}"></span>
+          <span class="service-name">${esc(svc.name)}</span>
+          <span class="chip ${running ? "on" : "off"}">${esc(stateText)}</span>
+          <span class="hint">${esc(svc.status || "")}</span>
+          <span class="service-actions">
+            <button class="toggle-btn ${running ? "ghost" : ""}" data-svc="${esc(svc.name)}" data-action="${running ? "stop" : "start"}" ${svc.exists ? "" : "disabled"}>${running ? "Stop" : "Start"}</button>
+          </span>`;
+        const button = row.querySelector("button");
+        if (button && svc.exists) {
+          button.addEventListener("click", async () => {
+            const action = button.dataset.action;
+            const name = button.dataset.svc;
+            button.disabled = true;
+            setStatus(`${action === "start" ? "Starting" : "Stopping"} ${name}...`);
+            try {
+              await api(`/admin/services/${encodeURIComponent(name)}/${action}`, { method: "POST", admin: true });
+              setStatus(`${name} ${action === "start" ? "started" : "stopped"}.`, "ok");
+            } catch (err) {
+              setStatus(err.message, "err");
+            }
+            await renderServices();
+            renderAudit();
+          });
+        }
+        el.appendChild(row);
+      }
+    }
     function renderEndpoints() {
       const el = $("endpoints");
       if (!el) return;
@@ -1644,6 +1718,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
       renderSnippets();
       renderAudit();
       renderTraffic();
+      renderServices();
       setStatus(`Connected: ${health.service} ${health.version}`, "ok");
 
       // Secondary data loads in the background so the console paints immediately.

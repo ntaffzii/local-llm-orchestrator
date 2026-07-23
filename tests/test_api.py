@@ -235,3 +235,35 @@ def test_admin_metrics_endpoint(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
+
+
+def test_docker_services_control(tmp_path, monkeypatch):
+    from services.orchestrator.docker_control import DockerControl
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="k", admin_api_key="", model_config_path=temp_config),
+    )
+    main_module.reload_components()
+    headers = {"Authorization": "Bearer k"}
+    try:
+        # Disabled by default: state is reported, actions are refused with 503.
+        monkeypatch.setattr(main_module, "docker_control", DockerControl(False, "/nope", "local-llm"))
+        client = TestClient(main_module.app)
+        listing = client.get("/admin/services", headers=headers)
+        assert listing.status_code == 200
+        assert listing.json()["enabled"] is False
+        assert client.post("/admin/services/llama-main/start", headers=headers).status_code == 503
+        # Admin auth required.
+        assert TestClient(main_module.app).get("/admin/services").status_code == 401
+
+        # Enabled: an out-of-allowlist container is forbidden without touching Docker.
+        monkeypatch.setattr(main_module, "docker_control", DockerControl(True, "/nope", "local-llm"))
+        assert client.post("/admin/services/evil-container/start", headers=headers).status_code == 403
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()

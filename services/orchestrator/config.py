@@ -37,6 +37,9 @@ class Settings:
     mcp_tool_allowlist: tuple[str, ...]
     trust_forwarded_for: bool
     admin_ui_enabled: bool
+    docker_control_enabled: bool
+    docker_socket: str
+    docker_compose_project: str
 
 
 def get_settings() -> Settings:
@@ -49,6 +52,9 @@ def get_settings() -> Settings:
         admin_api_key=os.getenv("ORCHESTRATOR_ADMIN_API_KEY", ""),
         trust_forwarded_for=_bool("TRUST_FORWARDED_FOR"),
         admin_ui_enabled=_bool("ADMIN_UI_ENABLED", True),
+        docker_control_enabled=_bool("DOCKER_CONTROL_ENABLED"),
+        docker_socket=os.getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
+        docker_compose_project=os.getenv("DOCKER_COMPOSE_PROJECT", "local-llm"),
         request_timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "300")),
         model_config_path=config_path,
         log_level=os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper(),

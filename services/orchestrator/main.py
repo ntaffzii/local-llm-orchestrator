@@ -19,6 +19,7 @@ from prompt_engine import consult_prompt
 
 from .admin_ui import admin_ui_html
 from .config import get_settings, load_model_config, save_model_config, validate_model_config
+from .docker_control import DockerControl, DockerControlDisabled, DockerControlError
 from .llama_client import ProviderClients
 from .mcp_client import McpClient
 from .metrics import MetricsStore
@@ -48,6 +49,9 @@ logger = logging.getLogger("local_llm.orchestrator")
 # Paths whose latency/success feed the traffic metrics.
 INFERENCE_PATHS = {"/v1/chat/completions", "/orchestrate/chat", "/prompt/improve"}
 metrics_store = MetricsStore()
+docker_control = DockerControl(
+    settings.docker_control_enabled, settings.docker_socket, settings.docker_compose_project
+)
 
 
 def build_components(
@@ -510,6 +514,36 @@ async def admin_audit_log(_: None = Depends(require_admin_api_key)) -> dict[str,
 @app.get("/admin/metrics")
 async def admin_metrics(window_seconds: float = 3600.0, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     return metrics_store.summary(window_seconds=window_seconds)
+
+
+@app.get("/admin/services")
+async def admin_services(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    try:
+        services = await docker_control.list_services()
+    except DockerControlError as exc:
+        return {"enabled": docker_control.enabled, "error": str(exc), "services": []}
+    return {"enabled": docker_control.enabled, "services": services}
+
+
+@app.post("/admin/services/{name}/{action}")
+async def admin_service_action(
+    name: str,
+    action: str,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    try:
+        result = await docker_control.set_service(name, action)
+    except DockerControlDisabled as exc:
+        raise HTTPException(status_code=503, detail={"code": "docker_control_disabled", "message": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "service_forbidden", "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_action", "message": str(exc)}) from exc
+    except DockerControlError as exc:
+        raise HTTPException(status_code=503, detail={"code": "docker_unavailable", "message": str(exc)}) from exc
+    _audit(http_request, f"service_{action}", service=name)
+    return result
 
 
 @app.post("/admin/config/virtual-model")
