@@ -112,6 +112,32 @@ async def test_prompt_service_preserves_original_creative_premise():
     assert THAI_CREATIVE_PROMPT in improved
 
 
+THAI_SIMPLE_SCRIPT_PROMPT = "สอนผมเขียนโค้ด python บวกเลขสองจำนวนหน่อย"
+
+
+def test_plain_script_request_skips_api_specific_guardrails():
+    # "python" alone classifies this as task_type "code", but the request is a
+    # trivial two-number addition script -- it has nothing to do with an API, so
+    # it must not get status-code/endpoint/framework/curl guardrails injected.
+    analysis = PromptAnalyzer().analyze(THAI_SIMPLE_SCRIPT_PROMPT)
+    assert analysis.task_type == "code"
+
+    improved = _enforce_required_guardrails(
+        "Write a Python script that adds two numbers and prints the result.",
+        analysis,
+        THAI_SIMPLE_SCRIPT_PROMPT,
+    )
+
+    assert "status code" not in improved.lower()
+    assert "curl" not in improved.lower()
+    assert "<endpoint_path>" not in improved
+    assert "<framework>" not in improved
+    assert "fake timestamp" not in improved.lower()
+    # Generic, always-appropriate guardrails should still be present.
+    assert "assumption" in improved.lower()
+    assert "minimal" in improved.lower()
+
+
 def test_code_guardrails_do_not_duplicate_provided_framework_or_endpoint():
     analysis = PromptAnalyzer().analyze(FASTAPI_HEALTH_PROMPT)
     improved = _enforce_required_guardrails(

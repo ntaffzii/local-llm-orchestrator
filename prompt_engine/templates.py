@@ -55,7 +55,10 @@ TEMPLATES: dict[str, PromptTemplate] = {
     "code": PromptTemplate(
         "code",
         (
-            "Improve the prompt for a coding task; do not write the code or solve the task. "
+            "Rewrite the prompt into a direct instruction telling the final model to write/implement the code itself "
+            "(e.g. 'Write a Python script that ...', 'Implement a function that ...'); you are only rewriting the "
+            "instruction, not writing the code yourself, and the rewritten instruction must never ask the final model "
+            "to create a task, spec, plan, or description instead of the actual code. "
             "Preserve the user's requested feature, platform, API behavior, technical terms, and key verbs literally before polishing wording. "
             "If the user did not specify language, framework, endpoint path, authentication, schema, ports, thresholds, or sample values, "
             "require placeholders and explicit assumptions instead of choosing concrete values; if the user did specify a detail, reuse it and do not ask for a placeholder for that detail. "

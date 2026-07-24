@@ -97,6 +97,11 @@ For fiction prompts, add requirements for concrete stakes, a central conflict, o
 For creative writing prompts, require the final model to return only the creative piece with no explanations, analysis, checklist, or notes after the story unless requested.
 Do not assume current/latest information is known; require verification when the user asks for latest, best now, current, or comparisons.
 Start with a direct imperative instruction for the final model.
+The improved prompt must instruct the final model to directly produce the deliverable itself
+(for example "Write a Python script that adds two numbers", "Implement a function that ..."),
+never an instruction to describe, design, or create a task/spec/plan for someone else to follow
+(for example never start with "Create a coding task for ...", "Design a task that ...", or
+"Write a task description for ..." -- those ask the final model to describe work instead of doing it).
 Do not write generic meta-advice such as "Understand the situation clearly" or "You need a straightforward guide".
 Do not refer to "assumptions defined earlier", "above", or "previous context" unless that content appears inside the improved prompt.
 If a concrete detail is missing, instruct the final model to state assumptions first and use placeholders.
@@ -142,15 +147,52 @@ def _rag_guardrails(lower: str, original_prompt: str) -> list[str]:
     return lines
 
 
+def _is_api_like(original_prompt: str) -> bool:
+    """Whether a code task actually involves a network service, not just any script.
+
+    'python'/'debug'/'implement' alone are enough to classify a prompt as task_type
+    "code", which used to make every plain script (e.g. "write python code to add
+    two numbers") get API-specific guardrails (status codes, curl test, endpoint/
+    framework placeholders) -- confusing both the improved prompt and the small
+    main model, which would echo the irrelevant guardrail structure back instead
+    of answering.
+    """
+    lower = original_prompt.lower()
+    api_signals = (
+        "api",
+        "endpoint",
+        "server",
+        "http",
+        "rest",
+        "route",
+        "request",
+        "response",
+        "database",
+        "backend",
+        "service",
+        "url",
+        "webhook",
+        "microservice",
+        "เซิร์ฟเวอร์",
+        "เอพีไอ",
+    )
+    if any(signal in lower for signal in api_signals):
+        return True
+    return bool(_provided_framework(original_prompt))
+
+
 def _code_guardrails(lower: str, original_prompt: str) -> list[str]:
     lines: list[str] = []
-    detail_flags = _provided_code_details(original_prompt)
     if "minimal implementation" not in lower and "minimal" not in lower:
         lines.append("Provide a minimal implementation.")
-    if "status code" not in lower:
-        lines.append("Include expected status codes.")
     if "error handling" not in lower and "error" not in lower:
         lines.append("Include basic error handling.")
+    if not _is_api_like(original_prompt):
+        return lines
+
+    detail_flags = _provided_code_details(original_prompt)
+    if "status code" not in lower:
+        lines.append("Include expected status codes.")
     if "test" not in lower and "curl" not in lower:
         lines.append("Include a small test example, such as a curl command.")
     if "hard-coded" not in lower and "fake timestamp" not in lower:
