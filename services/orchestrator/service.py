@@ -1,16 +1,65 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterator
 import json
+import time
+import uuid
 from copy import deepcopy
 from typing import Any
 
-from .llama_client import ProviderClients
+import httpx
+
+from .llama_client import ProviderClients, _stream_error_event
 from .mcp_client import McpClient, tool_result_text
 from .prompt_service import improve_prompt
 from .registry import ModelSelection
 from .router import RequestRouter
 from .schemas import ChatRequest, OrchestrateRequest
+
+
+def completion_as_sse(response: dict[str, Any]) -> Iterator[bytes]:
+    """Wrap one already-complete chat.completion dict as a single SSE chunk.
+
+    Used for legacy/tool-loop responses that were built by fully blocking calls and
+    can't be streamed token-by-token after the fact.
+    """
+    choice = response.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    chunk_id = response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
+    created = response.get("created", int(time.time()))
+    model = response.get("model", "local-orchestrator")
+    reasoning = message.get("reasoning_content", "")
+    if reasoning:
+        reasoning_chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": choice.get("index", 0),
+                    "delta": {"role": "assistant", "reasoning_content": reasoning},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": choice.get("index", 0),
+                "delta": {"role": "assistant", "content": message.get("content", "")},
+                "finish_reason": choice.get("finish_reason", "stop"),
+            }
+        ],
+    }
+    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    yield b"data: [DONE]\n\n"
 
 
 class OrchestratorService:
@@ -20,11 +69,13 @@ class OrchestratorService:
         mcp: McpClient,
         router: RequestRouter,
         config: dict[str, Any],
+        heartbeat_interval: float = 12.0,
     ) -> None:
         self.client = client
         self.mcp = mcp
         self.router = router
         self.config = config
+        self.heartbeat_interval = heartbeat_interval
         limit = int(config["orchestration"].get("max_concurrent_workflows", 2))
         self.workflow_slots = asyncio.Semaphore(max(1, limit))
 
@@ -60,6 +111,88 @@ class OrchestratorService:
             if use_tools:
                 return await self._run_tool_loop(selection.provider, payload, allowed_tools)
             return await self.client.post_json(selection.provider, "/v1/chat/completions", payload)
+
+    async def orchestrate_stream(
+        self, request: OrchestrateRequest, allowed_tools: set[str] | None = None
+    ) -> AsyncIterator[bytes]:
+        """Like orchestrate(), but streams the final answer as it's generated instead
+        of buffering the whole multi-stage pipeline before sending any bytes.
+
+        On a CPU-only host, prompt-improvement + generation can each take tens of
+        seconds. orchestrate() blocks through both stages before StreamingResponse
+        ever sends a byte, which looks like a dead connection to clients such as Open
+        WebUI -- they can give up waiting before the single buffered chunk arrives.
+        This yields SSE keep-alive comments during blocking stages and switches to
+        real token streaming for the final (non-tool) generation call.
+        """
+        try:
+            async with self.workflow_slots:
+                selection = self.router.route(request.model, request.messages)
+                messages = [message.model_dump(exclude_none=True) for message in request.messages]
+                improve_policy = (
+                    request.improve_prompt if request.improve_prompt is not None else selection.improve_prompt
+                )
+                tools_policy = request.use_tools if request.use_tools is not None else selection.use_tools
+
+                if self.router.should_improve(improve_policy, request.messages):
+                    holder: dict[str, Any] = {}
+                    async for chunk in self._yield_heartbeats_while(
+                        self._rewrite_last_user(messages, request.prompt_model), holder, self.heartbeat_interval
+                    ):
+                        yield chunk
+
+                use_tools = self.router.should_use_tools(tools_policy, request.messages)
+                if use_tools:
+                    self._inject_skill_agent_prompt(messages)
+
+                payload = request.model_dump(exclude_none=True)
+                for key in ("improve_prompt", "use_tools", "prompt_model"):
+                    payload.pop(key, None)
+                payload.update({"model": selection.target, "messages": messages})
+                self._apply_defaults(payload, selection)
+
+                if use_tools:
+                    # Tool rounds involve non-final intermediate calls; only the last
+                    # round has visible output, and by the time it's known to be last
+                    # the call has already been made. Keep this path buffered but
+                    # heartbeat through it so the connection doesn't look dead.
+                    payload["stream"] = False
+                    tool_holder: dict[str, Any] = {}
+                    async for chunk in self._yield_heartbeats_while(
+                        self._run_tool_loop(selection.provider, payload, allowed_tools),
+                        tool_holder,
+                        self.heartbeat_interval,
+                    ):
+                        yield chunk
+                    for chunk in completion_as_sse(tool_holder["value"]):
+                        yield chunk
+                    return
+
+                payload["stream"] = True
+                async for chunk in self.client.stream(selection.provider, "/v1/chat/completions", payload):
+                    yield chunk
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 503
+            yield _stream_error_event(status_code, str(exc).encode("utf-8"))
+
+    @staticmethod
+    async def _yield_heartbeats_while(
+        coro: Any, result_holder: dict[str, Any], interval: float = 12.0
+    ) -> AsyncIterator[bytes]:
+        task = asyncio.ensure_future(coro)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if task in done:
+                    break
+                # SSE comment line: ignored by any spec-compliant client, but keeps
+                # bytes flowing so idle-read timeouts on proxies/clients don't fire
+                # while a blocking model call is still in flight.
+                yield b": keep-alive\n\n"
+            result_holder["value"] = await task
+        except BaseException:
+            task.cancel()
+            raise
 
     async def _rewrite_last_user(self, messages: list[dict[str, Any]], prompt_model: str | None) -> None:
         target_prompt_model = self.config.get("prompt_improver", {}).get("model") or self.config["routing"]["prompt_model"]

@@ -1,6 +1,9 @@
+import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from services.orchestrator.config import load_model_config
@@ -331,3 +334,115 @@ async def test_allowed_tools_scope_filters_offered_tools():
     mcp.call_tool.assert_not_awaited()
     payload = client.post_json.await_args_list[0].args[2]
     assert "tools" not in payload
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_streams_real_tokens_after_prompt_improvement():
+    # The improved-prompt path should still block through the (fast, mocked) rewrite
+    # call, but the final generation must come through as real incremental chunks
+    # from client.stream(), not one buffered chunk after everything finishes.
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "Write a documented REST API."}}]}
+
+    async def fake_stream(provider, path, payload):
+        assert provider == "main"
+        assert payload["stream"] is True
+        assert payload["messages"][-1]["content"].startswith("Write a documented REST API.")
+        yield b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    # client.stream must return an async iterator directly (like the real
+    # ProviderClients.stream(), an async-generator function) -- AsyncMock's default
+    # call machinery returns a coroutine instead, which `async for` can't consume.
+    client.stream = fake_stream
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert chunks == [
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    prompt_call = client.post_json.await_args_list[0].args
+    assert prompt_call[0] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_sends_heartbeats_while_blocked():
+    # With a near-zero heartbeat interval, a slow (mocked) prompt-improve call must
+    # surface keep-alive SSE comments before the final streamed content -- otherwise
+    # the connection looks dead to clients for the whole blocking duration.
+    client = AsyncMock()
+
+    async def slow_post_json(provider, path, payload):
+        await asyncio.sleep(0.05)
+        return {"choices": [{"message": {"content": "Improved."}}]}
+
+    client.post_json.side_effect = slow_post_json
+
+    async def fake_stream(provider, path, payload):
+        yield b"data: [DONE]\n\n"
+
+    client.stream = fake_stream
+    mcp = AsyncMock()
+    service = OrchestratorService(
+        client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG, heartbeat_interval=0.01
+    )
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert chunks.count(b": keep-alive\n\n") > 0
+    assert chunks[-1] == b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_on_upstream_failure_during_improve():
+    # A blocking phase (prompt-improve here) now runs *inside* the streaming
+    # generator, after the ASGI response has already committed to 200 -- an
+    # unhandled exception here would crash the app the same way the old
+    # non-streaming upstream-error bug did. It must degrade to an SSE error event.
+    client = AsyncMock()
+    upstream_response = httpx.Response(400, json={"error": "context length exceeded"}, request=httpx.Request("POST", "http://x"))
+    client.post_json.side_effect = httpx.HTTPStatusError("bad request", request=upstream_response.request, response=upstream_response)
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    assert body.startswith("data: ")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 400
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_tool_loop_stays_buffered_as_single_chunk():
+    # Tool-loop responses can't be split into real tokens after the fact (the tool
+    # trace only exists once the whole loop finishes), so this path stays a single
+    # buffered SSE chunk -- confirm it still round-trips correctly through the
+    # streaming entrypoint.
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "answered without tools"}, "finish_reason": "stop"}]}
+    mcp = AsyncMock()
+    mcp.list_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}
+    ]
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-tools", improve_prompt=False, messages=[{"role": "user", "content": "Search"}]
+    )
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request, allowed_tools={"route_request"})]
+
+    assert len(chunks) == 2
+    assert chunks[1] == b"data: [DONE]\n\n"
+    event = json.loads(chunks[0].decode("utf-8")[len("data: "):].split("\n\n")[0])
+    assert event["choices"][0]["delta"]["content"] == "answered without tools"

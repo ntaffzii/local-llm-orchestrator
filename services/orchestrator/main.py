@@ -39,7 +39,7 @@ from .schemas import (
     UpdatePromptImproverRequest,
     UpdateVirtualModelRequest,
 )
-from .service import OrchestratorService
+from .service import OrchestratorService, completion_as_sse
 
 
 settings = get_settings()
@@ -380,45 +380,6 @@ def consultation_completion(prompt: str, model: str = "prompt-consultant") -> di
     }
 
 
-def completion_as_sse(response: dict[str, Any]):
-    choice = response.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    chunk_id = response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
-    created = response.get("created", int(time.time()))
-    model = response.get("model", "local-orchestrator")
-    reasoning = message.get("reasoning_content", "")
-    if reasoning:
-        reasoning_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": choice.get("index", 0),
-                    "delta": {"role": "assistant", "reasoning_content": reasoning},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        yield f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": choice.get("index", 0),
-                "delta": {"role": "assistant", "content": message.get("content", "")},
-                "finish_reason": choice.get("finish_reason", "stop"),
-            }
-        ],
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    yield b"data: [DONE]\n\n"
-
-
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {"status": "ok", "service": "local-llm-orchestrator", "version": app.version}
@@ -493,9 +454,12 @@ async def chat(request: ChatRequest, http_request: Request, _: None = Depends(re
 
         if workflow_required(request):
             workflow_request = OrchestrateRequest.model_validate(request.model_dump())
-            response = await orchestrator.orchestrate(workflow_request, allowed_tools=key_tools_scope(http_request))
             if request.stream:
-                return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
+                return StreamingResponse(
+                    orchestrator.orchestrate_stream(workflow_request, allowed_tools=key_tools_scope(http_request)),
+                    media_type="text/event-stream",
+                )
+            response = await orchestrator.orchestrate(workflow_request, allowed_tools=key_tools_scope(http_request))
             return JSONResponse(response)
 
         payload, selection = orchestrator.prepare_direct(request)
@@ -556,9 +520,12 @@ async def orchestrate(request: OrchestrateRequest, http_request: Request, _: Non
                 return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
             return JSONResponse(response)
 
-        response = await orchestrator.orchestrate(request, allowed_tools=key_tools_scope(http_request))
         if request.stream:
-            return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
+            return StreamingResponse(
+                orchestrator.orchestrate_stream(request, allowed_tools=key_tools_scope(http_request)),
+                media_type="text/event-stream",
+            )
+        response = await orchestrator.orchestrate(request, allowed_tools=key_tools_scope(http_request))
         return JSONResponse(response)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "model_not_found", "model": str(exc)}) from exc
