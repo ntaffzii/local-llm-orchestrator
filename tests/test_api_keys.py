@@ -58,3 +58,21 @@ def test_tools_scope_semantics(tmp_path):
     reloaded = {k["label"]: k for k in ApiKeyStore(tmp_path / "api_keys.json").list()}
     assert reloaded["a"]["scopes"]["tools"] is None
     assert reloaded["b"]["scopes"]["tools"] == []
+
+
+def test_wildcard_model_word_is_treated_as_unrestricted(tmp_path):
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    # Typing "all" (or "*"/"any") is a natural mistake for "no restriction" -- it must
+    # not be taken as a literal (nonexistent) model name that locks the key out of
+    # every real model.
+    for word in ["all", "ALL", "*", "any"]:
+        record, _ = store.create(f"key-{word}", models=[word])
+        assert record["scopes"]["models"] == [], f"wildcard word {word!r} was not normalized"
+
+    # Mixed with real names, the wildcard still wins (unambiguous "everything").
+    mixed, _ = store.create("mixed", models=["main-llm", "all"])
+    assert mixed["scopes"]["models"] == []
+
+    # A real model name alone is untouched.
+    real, _ = store.create("real", models=["main-llm"])
+    assert real["scopes"]["models"] == ["main-llm"]

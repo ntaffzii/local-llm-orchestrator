@@ -16,6 +16,20 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+_WILDCARD_WORDS = {"all", "*", "any"}
+
+
+def _normalize_model_scope(models: list[str] | None) -> list[str]:
+    # An empty scope already means "all models". Typing a wildcard word like "all"
+    # is a natural, common mistake -- without this, it would be taken literally as a
+    # model named "all" (which never exists), silently locking the key out of every
+    # real model. Treat any such word as equivalent to leaving the field empty.
+    cleaned = [m.strip() for m in (models or []) if m.strip()]
+    if any(m.lower() in _WILDCARD_WORDS for m in cleaned):
+        return []
+    return cleaned
+
+
 
 
 class ApiKeyStore:
@@ -66,7 +80,7 @@ class ApiKeyStore:
             # scopes.models: allowlist of client-facing model names, empty = all.
             # scopes.tools: None = all tools, [] = no tools, [names] = only those.
             "scopes": {
-                "models": [m.strip() for m in (models or []) if m.strip()],
+                "models": _normalize_model_scope(models),
                 "tools": None if tools is None else [t.strip() for t in tools if t.strip()],
             },
             "rate_limit_per_min": max(0, int(rate_limit_per_min or 0)),

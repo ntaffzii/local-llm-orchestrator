@@ -1184,8 +1184,8 @@ def admin_ui_html() -> str:
                 <input id="newKeyLabel" maxlength="80" placeholder="team-member-a">
               </div>
               <div>
-                <label for="newKeyModels">Allowed models</label>
-                <input id="newKeyModels" placeholder="empty = all · e.g. main-llm, coding">
+                <label for="newKeyModels">Allowed models <span class="hint">leave empty for all — do not type "all"</span></label>
+                <input id="newKeyModels" placeholder="Leave empty for all models · e.g. main-llm, coding">
               </div>
               <div>
                 <label for="newKeyRate">Rate limit / min</label>
@@ -1538,7 +1538,12 @@ def admin_ui_html() -> str:
     }
     async function createKey() {
       const label = $("newKeyLabel").value.trim() || "unnamed";
-      const models = $("newKeyModels").value.split(",").map(x => x.trim()).filter(Boolean);
+      const wildcardWords = new Set(["all", "*", "any"]);
+      let models = $("newKeyModels").value.split(",").map(x => x.trim()).filter(Boolean);
+      // Typing "all" is a natural mistake -- treat it as "leave empty" instead of a
+      // literal (nonexistent) model name that would silently lock the key out of
+      // everything. The server applies the same rule as a backstop.
+      if (models.some(m => wildcardWords.has(m.toLowerCase()))) models = [];
       const rate = Number($("newKeyRate").value || 0);
       const toolsMode = $("newKeyToolsMode").value;
       let tools = null; // all
