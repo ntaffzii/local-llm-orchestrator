@@ -1,0 +1,165 @@
+{
+  "providers": {
+    "main": {
+      "type": "openai-compatible",
+      "base_url": "${LLAMA_MAIN_URL}",
+      "api_key_env": ""
+    },
+    "prompt": {
+      "type": "openai-compatible",
+      "base_url": "${LLAMA_PROMPT_URL}",
+      "api_key_env": ""
+    }
+  },
+  "models": {
+    "lfm2.5-prompt": {
+      "display_name": "LFM2.5 Prompt Improver",
+      "provider": "prompt",
+      "capabilities": [
+        "chat",
+        "prompt-improvement"
+      ],
+      "defaults": {
+        "temperature": 0.05,
+        "max_tokens": 400,
+        "stop": [
+          "<|im_end|>",
+          "<|im_start|>"
+        ],
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "enabled": true
+    },
+    "gemma4-e2b": {
+      "display_name": "Main LLM (Gemma4 E2B)",
+      "provider": "main",
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "tools"
+      ],
+      "defaults": {
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "stop": [
+          "<end_of_turn>",
+          "<eos>"
+        ],
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "enabled": true
+    }
+  },
+  "virtual_models": {
+    "auto": {
+      "route": "auto",
+      "improve_prompt": "auto",
+      "tools": "auto"
+    },
+    "main-llm": {
+      "provider": "main",
+      "model": "gemma4-e2b",
+      "improve_prompt": false,
+      "tools": false
+    },
+    "main-llm-improved": {
+      "provider": "main",
+      "model": "gemma4-e2b",
+      "improve_prompt": true,
+      "tools": false
+    },
+    "main-llm-tools": {
+      "provider": "main",
+      "model": "gemma4-e2b",
+      "improve_prompt": false,
+      "tools": true
+    },
+    "prompt": {
+      "provider": "prompt",
+      "model": "lfm2.5-prompt",
+      "improve_prompt": false,
+      "tools": false
+    },
+    "prompt-consultant": {
+      "provider": "prompt",
+      "model": "lfm2.5-prompt",
+      "improve_prompt": false,
+      "tools": false
+    }
+  },
+  "routing": {
+    "default_model": "gemma4-e2b",
+    "coding_model": "gemma4-e2b",
+    "vision_model": "gemma4-e2b",
+    "prompt_model": "lfm2.5-prompt",
+    "short_prompt_words": 10,
+    "coding_keywords": [
+      "code",
+      "coding",
+      "debug",
+      "bug",
+      "function",
+      "class",
+      "api",
+      "sql",
+      "python",
+      "javascript",
+      "typescript",
+      "golang",
+      "rust",
+      "docker",
+      "kubernetes",
+      "โค้ด",
+      "เขียนโปรแกรม",
+      "แก้บั๊ก",
+      "ฟังก์ชัน",
+      "ฐานข้อมูล"
+    ],
+    "tool_keywords": [
+      "search",
+      "browse",
+      "read file",
+      "write file",
+      "github",
+      "database",
+      "calendar",
+      "ค้นหา",
+      "เปิดไฟล์",
+      "แก้ไฟล์",
+      "ปฏิทิน",
+      "อีเมล"
+    ]
+  },
+  "prompt_improver": {
+    "provider": "prompt",
+    "model": "prompt",
+    "system_prompt": "You are a strict, conservative English prompt rewriter. Convert the user's request into a clear English prompt for another AI model. The output MUST be English only, even if the user writes in Thai or another language. Preserve the user's intent, facts, names, numbers, constraints, and technical terms. Do not invent concrete endpoint paths, URLs, authentication, database choices, frameworks, cloud providers, response fields, business rules, infrastructure, timestamps, sample data, or parameter names that the user did not provide. Do not ask for required parameters, example inputs, or example outputs as if they already exist. When details are missing, explicitly tell the final model to state assumptions first and use placeholders such as <endpoint>, <framework>, <status_field>, <auth_scheme>, <timestamp_source>, or <response_schema> instead of fabricating values. For coding/API tasks, ask the final model to provide a minimal implementation, a proposed response shape clearly marked as an assumption, status codes, error handling, and a small test example. Tell the final model not to use hard-coded fake dates or fake production values. Keep the rewritten prompt focused and practical. Do not answer the task. Do not write code. Return only the improved English prompt.",
+    "temperature": 0.05,
+    "max_tokens": 700
+  },
+  "skill_agent": {
+    "enabled": true,
+    "system_prompt": "You are an AI agent using Skill-Agents through MCP. Use tools when they materially improve correctness, inspection, routing, prompt analysis, or access to external project/tool context. For skill/workflow selection requests, call route_request at most once with the original task. If route_request returns empty workflows, skills, and toolsets, optionally call list_toolsets once, then stop and explain that no registered MCP skill/workflow/toolset matched; do not claim that no SKILL.md files exist unless you explicitly searched for SKILL.md files; do not search only skill*.json or workflow*.json and present that as SKILL.md evidence. Do not call prompt_consult or prompt_improve_rule_based for skill/workflow selection unless the user explicitly asks to improve the prompt. For prompt-quality, prompt-planning, prompt-improvement, or prompt-debugging requests, choose the prompt tools yourself without requiring the user to name them exactly: call prompt_consult first to classify the prompt and identify missing details; if the user wants an improved prompt, a better version, or a usable final prompt, call prompt_improve_rule_based after prompt_consult using the same original prompt and an appropriate task_type from the consultation; if the user asks only whether the prompt is good, prompt_consult alone is enough. When calling prompt_improve_rule_based, set save_history=false unless the user explicitly asks to save prompt history. For prompt-improvement workflows, after tool results return, do not execute the improved prompt and do not write the final code, API implementation, schema, examples, production assumptions, or answer to the user's downstream task unless the user explicitly asks you to continue and execute the improved prompt. Instead, return only a concise prompt-workflow summary with: tools used, detected task type, quality score, top missing details, and the improved prompt from prompt_improve_rule_based. Keep that final response concise so finish_reason does not become length. For quick scoring or simple diagnosis, prompt_analyze is acceptable. For history requests, use prompt_history_* tools. For non-trivial planning tasks, call route_request at most once. If a compact instruction pack is useful and route_request recommends something, call build_agent_context at most once and follow only the selected workflows and skills. Load individual skills or workflows only when needed and only when they were recommended or explicitly requested. After receiving enough useful tool results, stop calling tools and provide the final answer. Do not repeat the same tool call with the same arguments. Prefer read-only and draft-only tools. Do not perform destructive or external side effects unless the user explicitly requests them and the tool policy permits them. In your final answer, briefly mention which tools you used when tools were called."
+  },
+  "orchestration": {
+    "max_tool_rounds": 10,
+    "max_concurrent_workflows": 2,
+    "retry_attempts": 2,
+    "retry_backoff_seconds": 0.5
+  },
+  "mcp": {
+    "enabled": true,
+    "tool_allowlist": [
+      "build_agent_context",
+      "get_toolset",
+      "list_toolsets",
+      "load_skill",
+      "load_workflow",
+      "route_request"
+    ]
+  }
+}

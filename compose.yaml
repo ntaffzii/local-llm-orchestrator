@@ -49,7 +49,9 @@ services:
       ORCHESTRATOR_LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-INFO}
       ORCHESTRATOR_CORS_ORIGINS: ${ORCHESTRATOR_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       LLAMA_BASE_URL: http://llama-router:8080
-      MODEL_CONFIG_PATH: /app/config/models.json
+      LLAMA_MAIN_URL: ${LLAMA_MAIN_URL:-}
+      LLAMA_PROMPT_URL: ${LLAMA_PROMPT_URL:-}
+      MODEL_CONFIG_PATH: /app/config/${MODEL_CONFIG_FILE:-models.json}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-300}
       MCP_ENABLED: ${MCP_ENABLED:-false}
       MCP_SERVER_URL: ${MCP_SERVER_URL:-http://host.docker.internal:8765/mcp}
