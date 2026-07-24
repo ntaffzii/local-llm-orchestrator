@@ -89,6 +89,8 @@ services:
       - "8080"
       - -c
       - ${LLAMA_CTX_SIZE:-8192}
+      - -ngl
+      - ${LLAMA_GPU_LAYERS:-0}
       - --no-webui
     volumes:
       - ./models:/models:ro
@@ -112,6 +114,8 @@ services:
       - "8080"
       - -c
       - ${LLAMA_CTX_SIZE:-8192}
+      - -ngl
+      - ${LLAMA_GPU_LAYERS:-0}
       - --no-webui
     volumes:
       - ./models:/models:ro
