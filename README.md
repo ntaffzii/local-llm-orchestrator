@@ -118,6 +118,25 @@ Docker quick start:
 `ORCHESTRATOR_API_KEY` ให้เอง นอกจากนี้ยังกำหนดคีย์ขณะเริ่มระบบได้ด้วย
 `.\scripts\docker-up.ps1 -Build -ApiKey "your-long-private-key-at-least-32-characters"`
 
+### GPU Acceleration (llama-main / llama-prompt)
+
+สำหรับ deployment แบบ pin ใช้เฉพาะ `llama-main`/`llama-prompt` (ดู `config/models.main-prompt-only.json` และ `MODEL_CONFIG_FILE`) เปิด GPU ได้ด้วย `compose.gpu.yaml` — overlay แบบ opt-in ที่สลับไปใช้ CUDA image และจอง NVIDIA GPU ให้ทั้งสอง container ต้องมี NVIDIA Container Toolkit (nvidia Docker runtime) บนเครื่องก่อน:
+
+```bash
+docker compose --env-file .env.docker -f compose.yaml -f compose.gpu.yaml --profile models up -d --force-recreate llama-main llama-prompt
+```
+
+ตั้งค่าใน `.env.docker`:
+
+```text
+LLAMA_CPP_CUDA_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda
+LLAMA_GPU_LAYERS=99
+```
+
+หมายเหตุ: ครั้งแรกหลัง recreate container ด้วย GPU, llama.cpp จะใช้เวลา 2-4 นาทีในขั้นตอน "fitting params to device memory" โดยไม่มี log ออกมาระหว่างนั้น — `docker ps` จะขึ้น `unhealthy` ชั่วคราว และคำขอที่เข้ามาช่วงนั้นจะได้ error กลับไป (orchestrator จัดการอย่างปลอดภัย ไม่ crash) รอจนเห็น `model loaded` / `server is listening` ใน `docker logs` ก่อนค่อยใช้งาน
+
+*(`compose.cuda.yaml` กับ flag `-Cuda` ของ `docker-up.ps1` เป็นของ deployment แบบเดิมที่ใช้ `llama-router`)*
+
 ## Open WebUI / GoModel
 
 ตั้ง OpenAI-compatible provider เป็น:
