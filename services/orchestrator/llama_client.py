@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import json
 import os
 import re
 from typing import Any
@@ -24,6 +25,17 @@ def resolve_base_url(raw: str | None, default: str) -> str:
     if match:
         return os.getenv(match.group(1), "").strip() or default
     return value or default
+
+
+def _stream_error_event(status_code: int, body: bytes) -> bytes:
+    try:
+        detail: Any = json.loads(body)
+    except ValueError:
+        detail = body.decode("utf-8", errors="replace")
+    payload = json.dumps(
+        {"error": {"code": "upstream_error", "status": status_code, "message": detail}}, ensure_ascii=False
+    )
+    return f"data: {payload}\n\ndata: [DONE]\n\n".encode("utf-8")
 
 
 class LlamaClient:
@@ -71,11 +83,23 @@ class LlamaClient:
             return response.json()
 
     async def stream(self, path: str, payload: dict[str, Any]) -> AsyncIterator[bytes]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", self._url(path), json=payload, headers=self._headers()) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_raw():
-                    yield chunk
+        # StreamingResponse sends HTTP 200 the moment the first chunk is requested, so
+        # by the time an upstream error is known here the status line is already on the
+        # wire and cannot be changed. Letting raise_for_status() propagate crashes the
+        # ASGI app mid-stream with an unhandled exception (e.g. on a context-length 400
+        # from llama.cpp) instead of telling the client anything. Emit one well-formed
+        # SSE error event and end the stream cleanly instead.
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", self._url(path), json=payload, headers=self._headers()) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        yield _stream_error_event(response.status_code, body)
+                        return
+                    async for chunk in response.aiter_raw():
+                        yield chunk
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            yield _stream_error_event(503, str(exc).encode("utf-8"))
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
