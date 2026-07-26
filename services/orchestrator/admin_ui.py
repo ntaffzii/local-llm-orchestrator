@@ -443,7 +443,7 @@ def admin_ui_html() -> str:
     .tr.models { grid-template-columns: 190px 150px minmax(180px, 1fr) 96px; }
     .tr.providers { grid-template-columns: 140px minmax(230px, 1fr) 150px; }
     .tr.audit { grid-template-columns: 160px 150px minmax(180px, 1fr) 120px; }
-    .tr.keys { grid-template-columns: minmax(120px, 1.2fr) minmax(90px, 1fr) 72px 84px 130px 92px; }
+    .tr.keys { grid-template-columns: minmax(120px, 1.2fr) minmax(90px, 1fr) 72px 78px 130px 130px 92px; }
     .key-code {
       display: flex;
       flex-wrap: wrap;
@@ -1192,7 +1192,11 @@ def admin_ui_html() -> str:
                 <input id="newKeyRate" type="number" min="0" step="1" value="0" placeholder="0 = unlimited">
               </div>
             </div>
-            <div class="row">
+            <div class="row three">
+              <div>
+                <label for="newKeyExpires">Expires in days <span class="hint">0 = never</span></label>
+                <input id="newKeyExpires" type="number" min="0" max="3650" step="1" value="0" placeholder="0 = never expires">
+              </div>
               <div>
                 <label for="newKeyToolsMode">MCP tools</label>
                 <select id="newKeyToolsMode">
@@ -1210,7 +1214,7 @@ def admin_ui_html() -> str:
               <button id="createKeyBtn">Create key</button>
             </div>
             <div id="newKeyReveal" class="status" style="display:none"></div>
-            <div class="hint" style="margin-top:8px">Keys grant inference access only, never admin. Scope limits which models the key may call. The full key is shown once and stored as a hash.</div>
+            <div class="hint" style="margin-top:8px">Keys grant inference access only, never admin. Scope limits which models the key may call. An expiring key stops working on its own — prefer it for temporary access. The full key is shown once and stored as a hash.</div>
           </section>
           <section>
             <div class="section-head">
@@ -1230,8 +1234,32 @@ def admin_ui_html() -> str:
     const views = [...document.querySelectorAll(".view")];
     const tabs = [...document.querySelectorAll(".tab")];
 
+    const IDLE_TIMEOUT_MIN = 30;
     function key() { return $("apiKey").value.trim(); }
     function adminKey() { return $("adminKey").value.trim() || key(); }
+    function sessionAgeMin() {
+      const at = Number(sessionStorage.getItem("orchestratorKeysAt") || 0);
+      if (!at) return 0;
+      return (Date.now() - at) / 60000;
+    }
+    function touchSession() {
+      if (sessionStorage.getItem("orchestratorApiKey")) {
+        sessionStorage.setItem("orchestratorKeysAt", String(Date.now()));
+      }
+    }
+    function clearSession() {
+      sessionStorage.removeItem("orchestratorApiKey");
+      sessionStorage.removeItem("orchestratorAdminKey");
+      sessionStorage.removeItem("orchestratorKeysAt");
+      $("apiKey").value = "";
+      $("adminKey").value = "";
+    }
+    function expireSessionIfIdle() {
+      if (!sessionStorage.getItem("orchestratorApiKey") || sessionAgeMin() <= IDLE_TIMEOUT_MIN) return;
+      clearSession();
+      document.querySelector(".content").classList.add("disconnected");
+      setStatus(`Session expired after ${IDLE_TIMEOUT_MIN} minutes idle. Enter your key to reconnect.`, "warn");
+    }
     function authHeaders() {
       return { "Authorization": "Bearer " + key(), "Content-Type": "application/json; charset=utf-8" };
     }
@@ -1503,8 +1531,8 @@ def admin_ui_html() -> str:
         return;
       }
       try { byKey = (await api("/admin/metrics", { admin: true })).by_key || {}; } catch { byKey = {}; }
-      table.innerHTML = `<div class="tr keys th"><span>Label</span><span>Scope</span><span>Rate</span><span>Req 1h</span><span>Last used</span><span>Action</span></div>`;
-      const active = keys.filter(k => !k.revoked);
+      table.innerHTML = `<div class="tr keys th"><span>Label</span><span>Scope</span><span>Rate</span><span>Req 1h</span><span>Expires</span><span>Last used</span><span>Action</span></div>`;
+      const active = keys.filter(k => !k.revoked && !k.expired);
       if (!active.length) {
         const empty = document.createElement("div");
         empty.className = "status";
@@ -1522,6 +1550,7 @@ def admin_ui_html() -> str:
         const scopeText = `${modelsText} · ${toolsText}`;
         const rateText = k.rate_limit_per_min ? `${k.rate_limit_per_min}/min` : "∞";
         const reqCount = byKey[k.label] || 0;
+        const expiresText = k.expires_at ? fmtTime(k.expires_at) : "never";
         const row = document.createElement("div");
         row.className = "tr keys";
         row.innerHTML = `
@@ -1529,6 +1558,7 @@ def admin_ui_html() -> str:
           <div class="td" data-label="Scope">${esc(scopeText)}</div>
           <div class="td" data-label="Rate">${esc(rateText)}</div>
           <div class="td" data-label="Req 1h">${esc(reqCount)}</div>
+          <div class="td" data-label="Expires">${esc(expiresText)}</div>
           <div class="td" data-label="Last used">${esc(k.last_used_at ? fmtTime(k.last_used_at) : "never")}</div>
           <div class="td" data-label="Action"><button class="ghost toggle-btn" data-id="${esc(k.id)}">Revoke</button></div>
         `;
@@ -1545,6 +1575,7 @@ def admin_ui_html() -> str:
       // everything. The server applies the same rule as a backstop.
       if (models.some(m => wildcardWords.has(m.toLowerCase()))) models = [];
       const rate = Number($("newKeyRate").value || 0);
+      const expiresInDays = Number($("newKeyExpires").value || 0);
       const toolsMode = $("newKeyToolsMode").value;
       let tools = null; // all
       if (toolsMode === "none") tools = [];
@@ -1552,7 +1583,7 @@ def admin_ui_html() -> str:
       setStatus("Creating key...");
       const data = await api("/admin/api-keys", {
         method: "POST", admin: true,
-        body: JSON.stringify({ label, models, rate_limit_per_min: rate, tools })
+        body: JSON.stringify({ label, models, rate_limit_per_min: rate, tools, expires_in_days: expiresInDays })
       });
       const reveal = $("newKeyReveal");
       reveal.style.display = "block";
@@ -1563,6 +1594,7 @@ def admin_ui_html() -> str:
       $("newKeyLabel").value = "";
       $("newKeyModels").value = "";
       $("newKeyRate").value = "0";
+      $("newKeyExpires").value = "0";
       $("newKeyToolsMode").value = "all";
       $("newKeyTools").value = "";
       await renderApiKeys();
@@ -2010,7 +2042,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("rememberBtn").addEventListener("click", () => {
       sessionStorage.setItem("orchestratorApiKey", key());
       sessionStorage.setItem("orchestratorAdminKey", $("adminKey").value.trim());
-      setStatus("Keys remembered for this browser tab.", "ok");
+      touchSession();
+      setStatus(`Keys remembered for this browser tab (cleared after ${IDLE_TIMEOUT_MIN} min idle).`, "ok");
     });
     $("virtualModel").addEventListener("change", loadRouteForm);
     $("saveVirtualBtn").addEventListener("click", () => saveRoute().catch(err => setStatus(err.message, "err")));
@@ -2035,8 +2068,17 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/v1/chat/completions" 
     $("copyPsBtn").addEventListener("click", () => copyText($("psSnippet").textContent));
     $("apiKey").addEventListener("input", () => markFieldError("apiKey", false));
     $("adminKey").addEventListener("input", () => markFieldError("adminKey", false));
-    $("apiKey").value = sessionStorage.getItem("orchestratorApiKey") || "";
-    $("adminKey").value = sessionStorage.getItem("orchestratorAdminKey") || "";
+    // Remembered keys are cleared after a period of inactivity so an unattended
+    // browser tab does not keep an admin credential usable indefinitely. Activity in
+    // the console refreshes the deadline; a reload past it starts from an empty form.
+    if (sessionAgeMin() > IDLE_TIMEOUT_MIN) {
+      clearSession();
+    } else {
+      $("apiKey").value = sessionStorage.getItem("orchestratorApiKey") || "";
+      $("adminKey").value = sessionStorage.getItem("orchestratorAdminKey") || "";
+    }
+    ["click", "keydown"].forEach(evt => document.addEventListener(evt, touchSession, { passive: true }));
+    setInterval(expireSessionIfIdle, 30000);
     renderSnippets();
   </script>
 </body>

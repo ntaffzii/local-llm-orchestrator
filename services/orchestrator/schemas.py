@@ -77,3 +77,5 @@ class CreateApiKeyRequest(BaseModel):
     rate_limit_per_min: int = Field(default=0, ge=0)
     # None = all tools; [] = no tools; ["a", "b"] = only those.
     tools: list[str] | None = None
+    # 0 = never expires (default); N = the key stops working N days after creation.
+    expires_in_days: int = Field(default=0, ge=0, le=3650)

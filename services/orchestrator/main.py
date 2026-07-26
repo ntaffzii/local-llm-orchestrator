@@ -158,7 +158,10 @@ class AuthThrottle:
     """Small in-process throttle that locks out an IP after repeated auth failures.
 
     This is defence-in-depth for a locally exposed admin API, not a substitute for a
-    real WAF. State is per-process and resets on restart.
+    real WAF. State is per-process and resets on restart -- with
+    ORCHESTRATOR_WORKERS > 1 each worker throttles independently, so the effective
+    lockout threshold is multiplied by the worker count. Keep workers at 1, or put a
+    real rate limiter in the reverse proxy, if this throttle is load-bearing.
     """
 
     def __init__(self, max_failures: int = 10, window_seconds: float = 60.0, lockout_seconds: float = 300.0) -> None:
@@ -195,11 +198,21 @@ class AuthThrottle:
         self._locked_until.clear()
 
 
+# Inference and admin auth get separate throttle state. Sharing one bucket lets a
+# noisy inference client (wrong/expired key, retry loop) burn the failure budget for
+# its whole source IP and lock the admin out of the console -- a self-inflicted
+# denial of the recovery path, from clients that never touch /admin at all. This is
+# especially easy to hit when several people share one egress IP behind NAT.
 auth_throttle = AuthThrottle()
+admin_auth_throttle = AuthThrottle()
 
 
 class RateLimiter:
-    """Per-key sliding-window request limiter (requests per minute). In-process."""
+    """Per-key sliding-window request limiter (requests per minute). In-process.
+
+    Per-process, like AuthThrottle: with ORCHESTRATOR_WORKERS > 1 a key's effective
+    limit is multiplied by the worker count.
+    """
 
     def __init__(self) -> None:
         self._hits: dict[str, deque[float]] = {}
@@ -284,12 +297,12 @@ def require_admin_api_key(request: Request, authorization: str | None = Header(d
             },
         )
     ip = _client_ip(request)
-    auth_throttle.check(ip)
+    admin_auth_throttle.check(ip)
     if not _bearer_matches(authorization, admin_key):
-        auth_throttle.record_failure(ip)
+        admin_auth_throttle.record_failure(ip)
         logger.warning("admin_auth_failed ip=%s path=%s", ip, request.url.path)
         raise HTTPException(status_code=401, detail={"code": "invalid_admin_api_key", "message": "Invalid admin API key"})
-    auth_throttle.record_success(ip)
+    admin_auth_throttle.record_success(ip)
 
 
 def enforce_model_scope(http_request: Request, model: str) -> None:
@@ -602,9 +615,24 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request, _: None
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
 
 
-# Recent admin config changes, newest first. In-memory only (resets on restart),
-# which is enough to power the console's activity view without a datastore.
+# Recent admin config changes, newest first. In-memory, so it powers the console's
+# activity view without a datastore -- but it is capped and lost on restart. Set
+# AUDIT_LOG_PATH to additionally append every entry to a file that outlives the process.
 AUDIT_LOG: deque[dict[str, Any]] = deque(maxlen=200)
+
+
+def _append_audit_file(entry: dict[str, Any]) -> None:
+    path = settings.audit_log_path
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        # A read-only or full filesystem must not turn a valid admin action into a 500.
+        # The in-memory entry and the log line above still record what happened.
+        logger.warning("audit_file_write_failed path=%s error=%s", path, exc)
 
 
 def _audit(http_request: Request, action: str, **fields: Any) -> None:
@@ -615,9 +643,15 @@ def _audit(http_request: Request, action: str, **fields: Any) -> None:
         return str(value).replace("\r", " ").replace("\n", " ")
 
     clean_fields = {key: _clean(value) for key, value in fields.items()}
-    AUDIT_LOG.appendleft(
-        {"id": request_id, "ip": _client_ip(http_request), "action": action, "fields": clean_fields, "at": time.time()}
-    )
+    entry = {
+        "id": request_id,
+        "ip": _client_ip(http_request),
+        "action": action,
+        "fields": clean_fields,
+        "at": time.time(),
+    }
+    AUDIT_LOG.appendleft(entry)
+    _append_audit_file(entry)
     extra = " ".join(f"{key}={value}" for key, value in clean_fields.items())
     logger.info("admin_audit id=%s ip=%s action=%s %s", request_id, _client_ip(http_request), action, extra)
 
@@ -660,6 +694,7 @@ async def create_api_key(
         models=request.models,
         rate_limit_per_min=request.rate_limit_per_min,
         tools=request.tools,
+        expires_in_days=request.expires_in_days,
     )
     scoped_tools = record["scopes"]["tools"]
     _audit(
@@ -670,6 +705,7 @@ async def create_api_key(
         models=",".join(record["scopes"]["models"]) or "all",
         tools="all" if scoped_tools is None else (",".join(scoped_tools) or "none"),
         rate=record["rate_limit_per_min"],
+        expires_in_days=request.expires_in_days or "never",
     )
     # The raw key is returned exactly once; it is never stored or shown again.
     return {"key": raw_key, "record": record}

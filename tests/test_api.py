@@ -1,3 +1,5 @@
+import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -141,18 +143,46 @@ def test_repeated_bad_admin_auth_gets_throttled(tmp_path, monkeypatch):
         replace(original_settings, api_key="user-key", admin_api_key="admin-key", model_config_path=temp_config),
     )
     main_module.reload_components()
-    main_module.auth_throttle.reset()
+    main_module.admin_auth_throttle.reset()
     client = TestClient(main_module.app)
     try:
         statuses = [
             client.get("/admin/config", headers={"Authorization": "Bearer wrong"}).status_code
-            for _ in range(main_module.auth_throttle.max_failures + 2)
+            for _ in range(main_module.admin_auth_throttle.max_failures + 2)
         ]
         # First failures are 401; once the lockout trips, requests get 429.
         assert statuses[0] == 401
         assert 429 in statuses
     finally:
-        main_module.auth_throttle.reset()
+        main_module.admin_auth_throttle.reset()
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
+def test_inference_auth_failures_do_not_lock_out_admin(tmp_path, monkeypatch):
+    # Inference and admin auth keep separate throttle state: a client hammering a wrong
+    # inference key from a shared egress IP must not lock the admin out of the console,
+    # which is the very surface needed to revoke that client's key.
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="user-key", admin_api_key="admin-key", model_config_path=temp_config),
+    )
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    try:
+        inference_statuses = [
+            client.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code
+            for _ in range(main_module.auth_throttle.max_failures + 2)
+        ]
+        assert 429 in inference_statuses  # the inference side did trip
+
+        # The admin side is untouched and still authenticates normally.
+        assert client.get("/admin/config", headers={"Authorization": "Bearer admin-key"}).status_code == 200
+    finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()
 
@@ -415,6 +445,107 @@ def test_api_key_model_scope_blocks_prompt_model_override(tmp_path, monkeypatch)
         )
         assert response.status_code == 403
         assert response.json()["detail"]["code"] == "model_forbidden"
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
+def test_expired_api_key_is_rejected_by_the_api(tmp_path, monkeypatch):
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="root", admin_api_key="admin", model_config_path=temp_config),
+    )
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    monkeypatch.setattr(main_module, "api_key_store", store)
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    admin = {"Authorization": "Bearer admin"}
+    try:
+        created = client.post(
+            "/admin/api-keys", headers=admin, json={"label": "temp", "expires_in_days": 1}
+        )
+        assert created.status_code == 200
+        raw = created.json()["key"]
+        key_headers = {"Authorization": f"Bearer {raw}"}
+        assert client.get("/v1/models", headers=key_headers).status_code == 200
+
+        # Move the expiry into the past; the same key must now be refused.
+        store._keys[0]["expires_at"] = time.time() - 1
+        assert client.get("/v1/models", headers=key_headers).status_code == 401
+
+        # The expired key is flagged in the admin listing so it can be cleaned up.
+        listed = client.get("/admin/api-keys", headers=admin).json()["keys"]
+        assert listed[0]["expired"] is True
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
+def test_audit_entries_are_appended_to_the_audit_file(tmp_path, monkeypatch):
+    # The in-memory ring buffer is capped and lost on restart, which is exactly when an
+    # investigation needs it -- AUDIT_LOG_PATH persists each entry as a JSON line.
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    audit_path = tmp_path / "nested" / "audit.jsonl"
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(
+            original_settings,
+            api_key="root",
+            admin_api_key="admin",
+            model_config_path=temp_config,
+            audit_log_path=audit_path,
+        ),
+    )
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    try:
+        assert client.post("/admin/reload", headers={"Authorization": "Bearer admin"}, json={}).status_code == 200
+        assert audit_path.exists()  # parent directory is created on demand
+        entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert entries[-1]["action"] == "reload"
+        assert "at" in entries[-1] and "ip" in entries[-1]
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
+def test_audit_file_write_failure_does_not_break_the_admin_action(tmp_path, monkeypatch):
+    # A read-only or full filesystem must degrade to "no file entry", not a 500 that
+    # blocks the admin from actually managing the service.
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    # A path whose parent is an existing *file* cannot be created as a directory.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(
+            original_settings,
+            api_key="root",
+            admin_api_key="admin",
+            model_config_path=temp_config,
+            audit_log_path=blocker / "audit.jsonl",
+        ),
+    )
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    try:
+        response = client.post("/admin/reload", headers={"Authorization": "Bearer admin"}, json={})
+        assert response.status_code == 200
+        # The in-memory audit still recorded it.
+        entries = client.get("/admin/audit", headers={"Authorization": "Bearer admin"}).json()["entries"]
+        assert any(entry["action"] == "reload" for entry in entries)
     finally:
         monkeypatch.setattr(main_module, "settings", original_settings)
         main_module.reload_components()

@@ -41,6 +41,7 @@ class Settings:
     docker_socket: str
     docker_compose_project: str
     api_keys_path: Path
+    audit_log_path: Path | None
 
 
 def get_settings() -> Settings:
@@ -50,6 +51,15 @@ def get_settings() -> Settings:
     api_keys_path = Path(os.getenv("API_KEYS_PATH", str(ROOT / "config" / "api_keys.json")))
     if not api_keys_path.is_absolute():
         api_keys_path = (ROOT / api_keys_path).resolve()
+    # Opt-in: the in-memory audit ring buffer is lost on restart/crash, which is exactly
+    # when an investigation needs it. Setting a path additionally appends each admin
+    # action as one JSON line that survives the process.
+    raw_audit_path = os.getenv("AUDIT_LOG_PATH", "").strip()
+    audit_log_path: Path | None = None
+    if raw_audit_path:
+        audit_log_path = Path(raw_audit_path)
+        if not audit_log_path.is_absolute():
+            audit_log_path = (ROOT / audit_log_path).resolve()
     return Settings(
         llama_base_url=os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080").rstrip("/"),
         api_key=os.getenv("ORCHESTRATOR_API_KEY", ""),
@@ -60,6 +70,7 @@ def get_settings() -> Settings:
         docker_socket=os.getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
         docker_compose_project=os.getenv("DOCKER_COMPOSE_PROJECT", "local-llm"),
         api_keys_path=api_keys_path,
+        audit_log_path=audit_log_path,
         request_timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "300")),
         model_config_path=config_path,
         log_level=os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper(),

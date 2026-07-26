@@ -1,3 +1,7 @@
+import time
+
+import pytest
+
 from services.orchestrator.api_keys import ApiKeyStore
 
 
@@ -58,6 +62,48 @@ def test_tools_scope_semantics(tmp_path):
     reloaded = {k["label"]: k for k in ApiKeyStore(tmp_path / "api_keys.json").list()}
     assert reloaded["a"]["scopes"]["tools"] is None
     assert reloaded["b"]["scopes"]["tools"] == []
+
+
+def test_key_without_expiry_never_expires(tmp_path):
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    record, raw = store.create("forever")
+    assert record["expires_at"] is None
+    assert record["expired"] is False
+    assert store.verify(raw) is not None
+
+
+def test_expired_key_is_rejected_and_hidden_from_has_keys(tmp_path):
+    path = tmp_path / "api_keys.json"
+    store = ApiKeyStore(path)
+    record, raw = store.create("temporary", expires_in_days=7)
+    assert record["expires_at"] == pytest.approx(record["created_at"] + 7 * 86400)
+    assert store.verify(raw) is not None
+
+    # Rewind the stored expiry into the past instead of sleeping.
+    store._keys[0]["expires_at"] = time.time() - 1
+    assert store.verify(raw) is None
+    assert store.has_keys() is False
+    assert store.list()[0]["expired"] is True
+
+    # The rule is enforced on load too, not just in this process.
+    store._save()
+    assert ApiKeyStore(path).verify(raw) is None
+
+
+def test_records_written_before_expiry_existed_still_verify(tmp_path):
+    # Backward compatibility: an api_keys.json from before this feature has no
+    # expires_at field at all, and must keep working rather than being treated as
+    # expired (which would lock every existing deployment out at once).
+    path = tmp_path / "api_keys.json"
+    store = ApiKeyStore(path)
+    _, raw = store.create("legacy")
+    del store._keys[0]["expires_at"]
+    store._save()
+
+    reloaded = ApiKeyStore(path)
+    assert reloaded.verify(raw) is not None
+    assert reloaded.has_keys() is True
+    assert reloaded.list()[0]["expired"] is False
 
 
 def test_wildcard_model_word_is_treated_as_unrestricted(tmp_path):
