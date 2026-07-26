@@ -25,7 +25,12 @@ jobs:
       - name: Validate configuration syntax
         shell: pwsh
         run: |
-          Get-Content config/models.json -Raw | ConvertFrom-Json | Out-Null
+          # Validate every model config, not just the default one -- alternate configs
+          # like models.main-prompt-only.json are real, tracked deployment options
+          # (selected via MODEL_CONFIG_FILE) and must not be able to ship broken JSON.
+          Get-ChildItem config/models*.json | ForEach-Object {
+            Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null
+          }
           $tokens = $null
           $errors = @()
           Get-ChildItem scripts/*.ps1 | ForEach-Object {
