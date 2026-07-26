@@ -362,6 +362,64 @@ def test_api_key_scope_and_rate_limit(tmp_path, monkeypatch):
         main_module.reload_components()
 
 
+def test_api_key_model_scope_blocks_prompt_model_override(tmp_path, monkeypatch):
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="root", admin_api_key="admin", model_config_path=temp_config),
+    )
+    monkeypatch.setattr(main_module, "api_key_store", ApiKeyStore(tmp_path / "api_keys.json"))
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    admin = {"Authorization": "Bearer admin"}
+    try:
+        created = client.post(
+            "/admin/api-keys",
+            headers=admin,
+            json={"label": "scoped", "models": ["main-llm-improved"]},
+        )
+        raw = created.json()["key"]
+        key_headers = {"Authorization": f"Bearer {raw}", "Content-Type": "application/json"}
+
+        # `model` is in scope, but `prompt_model` names a model outside the key's scope --
+        # must be rejected before any prompt-improvement call is made, not silently allowed.
+        response = client.post(
+            "/orchestrate/chat",
+            headers=key_headers,
+            json={
+                "model": "main-llm-improved",
+                "prompt_model": "coding",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "model_forbidden"
+
+        # The same smuggling attempt through the OpenAI-compatible endpoint. "main-llm-improved"
+        # already has improve_prompt=true in its own virtual-model policy (so workflow_required
+        # triggers the workflow path), and ChatRequest's extra="allow" lets the extra
+        # `prompt_model` field survive into the OrchestrateRequest promotion.
+        response = client.post(
+            "/v1/chat/completions",
+            headers=key_headers,
+            json={
+                "model": "main-llm-improved",
+                "prompt_model": "coding",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "model_forbidden"
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
 def test_api_key_tools_scope_enforced(tmp_path, monkeypatch):
     from services.orchestrator.api_keys import ApiKeyStore
 

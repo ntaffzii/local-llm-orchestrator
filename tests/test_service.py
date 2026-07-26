@@ -337,6 +337,28 @@ async def test_allowed_tools_scope_filters_offered_tools():
 
 
 @pytest.mark.asyncio
+async def test_allowed_models_scope_blocks_prompt_model_override():
+    # A key scoped to a specific set of models must not be able to redirect
+    # prompt-improvement to a model outside that scope via `prompt_model` -- that
+    # would let a restricted key reach an unauthorized model/provider.
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm",
+        improve_prompt=True,
+        prompt_model="coding",
+        messages=[{"role": "user", "content": "Build API"}],
+    )
+
+    with pytest.raises(PermissionError):
+        await service.orchestrate(request, allowed_models={"main-llm"})
+
+    # No upstream call should have been made -- the check happens before any call.
+    client.post_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_orchestrate_stream_streams_real_tokens_after_prompt_improvement():
     # The improved-prompt path should still block through the (fast, mocked) rewrite
     # call, but the final generation must come through as real incremental chunks
@@ -421,6 +443,47 @@ async def test_orchestrate_stream_emits_sse_error_on_upstream_failure_during_imp
     event = json.loads(body.split("\n\n")[0][len("data: "):])
     assert event["error"]["status"] == 400
     assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_on_unknown_model():
+    # registry.selection() raises a plain KeyError for an unknown model id -- that is
+    # not an httpx exception, so it must be caught separately or it crashes the ASGI
+    # app mid-stream (the response has already committed to 200 by this point) the
+    # same way unhandled upstream errors used to.
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="does-not-exist", messages=[{"role": "user", "content": "hi"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 404
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_when_prompt_model_outside_scope():
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm",
+        improve_prompt=True,
+        prompt_model="coding",
+        messages=[{"role": "user", "content": "Build API"}],
+    )
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request, allowed_models={"main-llm"})]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 403
+    client.post_json.assert_not_awaited()
 
 
 @pytest.mark.asyncio

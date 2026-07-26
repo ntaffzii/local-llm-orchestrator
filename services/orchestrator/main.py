@@ -304,6 +304,20 @@ def enforce_model_scope(http_request: Request, model: str) -> None:
         )
 
 
+def key_model_scope(http_request: Request) -> set[str] | None:
+    """Return the key's model allowlist, or None for unrestricted (root / all-models).
+
+    Used to also gate client-suppliable model overrides that bypass the top-level
+    `model` field (e.g. `prompt_model`), so a scoped key cannot reach a model outside
+    its `scopes.models` allowlist through a side channel.
+    """
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return None
+    allowed = (record.get("scopes") or {}).get("models") or []
+    return set(allowed) if allowed else None
+
+
 def key_tools_scope(http_request: Request) -> set[str] | None:
     """Return the key's tool allowlist, or None for unrestricted (root / all-tools)."""
     record = getattr(http_request.state, "api_key", None)
@@ -456,10 +470,18 @@ async def chat(request: ChatRequest, http_request: Request, _: None = Depends(re
             workflow_request = OrchestrateRequest.model_validate(request.model_dump())
             if request.stream:
                 return StreamingResponse(
-                    orchestrator.orchestrate_stream(workflow_request, allowed_tools=key_tools_scope(http_request)),
+                    orchestrator.orchestrate_stream(
+                        workflow_request,
+                        allowed_tools=key_tools_scope(http_request),
+                        allowed_models=key_model_scope(http_request),
+                    ),
                     media_type="text/event-stream",
                 )
-            response = await orchestrator.orchestrate(workflow_request, allowed_tools=key_tools_scope(http_request))
+            response = await orchestrator.orchestrate(
+                workflow_request,
+                allowed_tools=key_tools_scope(http_request),
+                allowed_models=key_model_scope(http_request),
+            )
             return JSONResponse(response)
 
         payload, selection = orchestrator.prepare_direct(request)
@@ -471,6 +493,8 @@ async def chat(request: ChatRequest, http_request: Request, _: None = Depends(re
         return JSONResponse(await provider_clients.post_json(selection.provider, "/v1/chat/completions", payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "model_not_found", "model": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "model_forbidden", "message": str(exc)}) from exc
     except httpx.HTTPStatusError as exc:
         raise upstream_error(exc) from exc
     except (httpx.ConnectError, httpx.ReadTimeout) as exc:
@@ -522,13 +546,23 @@ async def orchestrate(request: OrchestrateRequest, http_request: Request, _: Non
 
         if request.stream:
             return StreamingResponse(
-                orchestrator.orchestrate_stream(request, allowed_tools=key_tools_scope(http_request)),
+                orchestrator.orchestrate_stream(
+                    request,
+                    allowed_tools=key_tools_scope(http_request),
+                    allowed_models=key_model_scope(http_request),
+                ),
                 media_type="text/event-stream",
             )
-        response = await orchestrator.orchestrate(request, allowed_tools=key_tools_scope(http_request))
+        response = await orchestrator.orchestrate(
+            request,
+            allowed_tools=key_tools_scope(http_request),
+            allowed_models=key_model_scope(http_request),
+        )
         return JSONResponse(response)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "model_not_found", "model": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "model_forbidden", "message": str(exc)}) from exc
     except httpx.HTTPStatusError as exc:
         raise upstream_error(exc) from exc
 

@@ -7,6 +7,11 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    env:
+      # Without this, ORCHESTRATOR_API_KEY is unset in CI (no .env file is checked in),
+      # so require_api_key() runs in its no-auth-configured "open mode" and any key is
+      # accepted -- test_models_reject_wrong_api_key then fails with 200 instead of 401.
+      ORCHESTRATOR_API_KEY: ci-test-key-not-a-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

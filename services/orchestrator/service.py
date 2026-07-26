@@ -87,7 +87,10 @@ class OrchestratorService:
         return payload, selection
 
     async def orchestrate(
-        self, request: OrchestrateRequest, allowed_tools: set[str] | None = None
+        self,
+        request: OrchestrateRequest,
+        allowed_tools: set[str] | None = None,
+        allowed_models: set[str] | None = None,
     ) -> dict[str, Any]:
         async with self.workflow_slots:
             selection = self.router.route(request.model, request.messages)
@@ -96,7 +99,7 @@ class OrchestratorService:
             tools_policy = request.use_tools if request.use_tools is not None else selection.use_tools
 
             if self.router.should_improve(improve_policy, request.messages):
-                await self._rewrite_last_user(messages, request.prompt_model)
+                await self._rewrite_last_user(messages, request.prompt_model, allowed_models)
 
             use_tools = self.router.should_use_tools(tools_policy, request.messages)
             if use_tools:
@@ -113,7 +116,10 @@ class OrchestratorService:
             return await self.client.post_json(selection.provider, "/v1/chat/completions", payload)
 
     async def orchestrate_stream(
-        self, request: OrchestrateRequest, allowed_tools: set[str] | None = None
+        self,
+        request: OrchestrateRequest,
+        allowed_tools: set[str] | None = None,
+        allowed_models: set[str] | None = None,
     ) -> AsyncIterator[bytes]:
         """Like orchestrate(), but streams the final answer as it's generated instead
         of buffering the whole multi-stage pipeline before sending any bytes.
@@ -137,7 +143,9 @@ class OrchestratorService:
                 if self.router.should_improve(improve_policy, request.messages):
                     holder: dict[str, Any] = {}
                     async for chunk in self._yield_heartbeats_while(
-                        self._rewrite_last_user(messages, request.prompt_model), holder, self.heartbeat_interval
+                        self._rewrite_last_user(messages, request.prompt_model, allowed_models),
+                        holder,
+                        self.heartbeat_interval,
                     ):
                         yield chunk
 
@@ -174,6 +182,14 @@ class OrchestratorService:
         except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
             status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 503
             yield _stream_error_event(status_code, str(exc).encode("utf-8"))
+        except KeyError as exc:
+            # An unknown model/prompt_model. StreamingResponse has already sent its 200
+            # status line by the time this generator runs, so the only way to tell the
+            # client is a clean SSE error event -- the route handler's `except KeyError`
+            # never sees this, it only wraps the (already-returned) StreamingResponse.
+            yield _stream_error_event(404, f"model_not_found: {exc}".encode("utf-8"))
+        except PermissionError as exc:
+            yield _stream_error_event(403, str(exc).encode("utf-8"))
 
     @staticmethod
     async def _yield_heartbeats_while(
@@ -194,9 +210,21 @@ class OrchestratorService:
             task.cancel()
             raise
 
-    async def _rewrite_last_user(self, messages: list[dict[str, Any]], prompt_model: str | None) -> None:
+    async def _rewrite_last_user(
+        self,
+        messages: list[dict[str, Any]],
+        prompt_model: str | None,
+        allowed_models: set[str] | None = None,
+    ) -> None:
         target_prompt_model = self.config.get("prompt_improver", {}).get("model") or self.config["routing"]["prompt_model"]
-        prompt_selection = self.router.registry.selection(prompt_model or target_prompt_model)
+        resolved_prompt_model = prompt_model or target_prompt_model
+        # A caller can only override the prompt-improvement model with one already in
+        # its own model scope -- otherwise a key restricted to model A could smuggle
+        # inference to model B (or an unrelated provider) via `prompt_model` even
+        # though it never had scope to call B directly.
+        if allowed_models is not None and resolved_prompt_model not in allowed_models:
+            raise PermissionError(f"This key cannot use model: {resolved_prompt_model}")
+        prompt_selection = self.router.registry.selection(resolved_prompt_model)
         for message in reversed(messages):
             if message.get("role") == "user" and isinstance(message.get("content"), str):
                 message["content"] = await improve_prompt(
