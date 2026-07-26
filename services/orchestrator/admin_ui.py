@@ -1237,13 +1237,22 @@ def admin_ui_html() -> str:
     const IDLE_TIMEOUT_MIN = 30;
     function key() { return $("apiKey").value.trim(); }
     function adminKey() { return $("adminKey").value.trim() || key(); }
+    function hasStoredKeys() {
+      // The admin key alone is enough to keep a session alive: it is the more
+      // sensitive of the two, and gating on the API key would leave it stored
+      // forever whenever only the admin field was filled in.
+      return !!(sessionStorage.getItem("orchestratorApiKey") || sessionStorage.getItem("orchestratorAdminKey"));
+    }
     function sessionAgeMin() {
       const at = Number(sessionStorage.getItem("orchestratorKeysAt") || 0);
-      if (!at) return 0;
+      // Stored keys with no timestamp (written by an older build, or by a path that
+      // skipped touchSession) must count as stale rather than brand new -- treating
+      // "unknown age" as zero would disable the timeout for that tab entirely.
+      if (!at) return hasStoredKeys() ? Infinity : 0;
       return (Date.now() - at) / 60000;
     }
     function touchSession() {
-      if (sessionStorage.getItem("orchestratorApiKey")) {
+      if (hasStoredKeys()) {
         sessionStorage.setItem("orchestratorKeysAt", String(Date.now()));
       }
     }
@@ -1255,7 +1264,7 @@ def admin_ui_html() -> str:
       $("adminKey").value = "";
     }
     function expireSessionIfIdle() {
-      if (!sessionStorage.getItem("orchestratorApiKey") || sessionAgeMin() <= IDLE_TIMEOUT_MIN) return;
+      if (!hasStoredKeys() || sessionAgeMin() <= IDLE_TIMEOUT_MIN) return;
       clearSession();
       document.querySelector(".content").classList.add("disconnected");
       setStatus(`Session expired after ${IDLE_TIMEOUT_MIN} minutes idle. Enter your key to reconnect.`, "warn");

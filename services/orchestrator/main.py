@@ -259,8 +259,11 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def require_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
-    # Open mode only when no auth is configured at all (root key unset and no managed keys).
-    if not settings.api_key and not api_key_store.has_keys():
+    # Open mode only when no auth was ever configured (root key unset and no managed key
+    # has ever been issued). Note this asks "is auth configured", NOT "is a key currently
+    # valid" -- keying it on validity would make a managed-keys-only deployment fall open
+    # to anonymous callers the moment its last key expired or was revoked.
+    if not settings.api_key and not api_key_store.is_configured():
         return
     ip = _client_ip(request)
     auth_throttle.check(ip)

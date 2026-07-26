@@ -90,6 +90,25 @@ def test_expired_key_is_rejected_and_hidden_from_has_keys(tmp_path):
     assert ApiKeyStore(path).verify(raw) is None
 
 
+def test_is_configured_stays_true_once_any_key_was_issued(tmp_path):
+    # is_configured() answers "was key auth ever set up", which must NOT track whether a
+    # key is currently usable: require_api_key only skips authentication entirely when
+    # this is False, so a deployment whose keys all expire or get revoked has to keep
+    # failing closed instead of falling open to anonymous callers.
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    assert store.is_configured() is False
+
+    record, _ = store.create("only-key", expires_in_days=30)
+    assert store.is_configured() is True
+
+    store._keys[0]["expires_at"] = time.time() - 1
+    assert store.has_keys() is False       # nothing can authenticate...
+    assert store.is_configured() is True   # ...but auth is still configured
+
+    store.revoke(record["id"])
+    assert store.is_configured() is True
+
+
 def test_records_written_before_expiry_existed_still_verify(tmp_path):
     # Backward compatibility: an api_keys.json from before this feature has no
     # expires_at field at all, and must keep working rather than being treated as

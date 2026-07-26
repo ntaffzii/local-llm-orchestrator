@@ -487,6 +487,66 @@ def test_expired_api_key_is_rejected_by_the_api(tmp_path, monkeypatch):
         main_module.reload_components()
 
 
+def test_expired_keys_do_not_open_a_managed_keys_only_deployment(tmp_path, monkeypatch):
+    # Regression: a deployment with no root key that relies purely on managed keys must
+    # fail CLOSED when its last key expires. Gating open mode on "a key is currently
+    # valid" made the API serve anonymous callers at that moment -- and, because the
+    # open-mode check runs before the token is inspected, it also let the expired key
+    # itself back in, with all scope/rate limits bypassed.
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="", admin_api_key="admin", model_config_path=temp_config),
+    )
+    store = ApiKeyStore(tmp_path / "api_keys.json")
+    monkeypatch.setattr(main_module, "api_key_store", store)
+    main_module.reload_components()
+    client = TestClient(main_module.app)
+    try:
+        _, raw = store.create("only-key", expires_in_days=30)
+        assert client.get("/v1/models").status_code == 401  # anonymous rejected while valid
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {raw}"}).status_code == 200
+
+        store._keys[0]["expires_at"] = time.time() - 1
+        assert client.get("/v1/models", headers={"Authorization": f"Bearer {raw}"}).status_code == 401
+        assert client.get("/v1/models").status_code == 401  # still no anonymous access
+
+        # Revoking the last key must not open it up either.
+        store._keys[0]["expires_at"] = None
+        store.revoke(store.list()[0]["id"])
+        assert client.get("/v1/models").status_code == 401
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
+def test_open_mode_still_applies_when_no_auth_was_ever_configured(tmp_path, monkeypatch):
+    # The flip side: a fresh local deployment with no root key and no issued keys keeps
+    # its convenience open mode, so the fix above does not lock anyone out by default.
+    from services.orchestrator.api_keys import ApiKeyStore
+
+    original_settings = main_module.settings
+    temp_config = tmp_path / "models.json"
+    temp_config.write_text(Path(original_settings.model_config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, api_key="", admin_api_key="admin", model_config_path=temp_config),
+    )
+    monkeypatch.setattr(main_module, "api_key_store", ApiKeyStore(tmp_path / "absent.json"))
+    main_module.reload_components()
+    try:
+        assert TestClient(main_module.app).get("/v1/models").status_code == 200
+    finally:
+        monkeypatch.setattr(main_module, "settings", original_settings)
+        main_module.reload_components()
+
+
 def test_audit_entries_are_appended_to_the_audit_file(tmp_path, monkeypatch):
     # The in-memory ring buffer is capped and lost on restart, which is exactly when an
     # investigation needs it -- AUDIT_LOG_PATH persists each entry as a JSON line.

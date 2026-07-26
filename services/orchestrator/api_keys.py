@@ -65,7 +65,20 @@ class ApiKeyStore:
             return False
         return (now if now is not None else time.time()) >= float(expires_at)
 
+    def is_configured(self) -> bool:
+        """Whether key-based auth has ever been set up on this deployment.
+
+        Deliberately counts revoked and expired records too. Callers use this to decide
+        whether the service may run without authentication at all, and that must not
+        depend on a key being *currently* valid: a deployment with no root key whose
+        managed keys all expire (or get revoked) has to fail closed and reject
+        everything, not fall open to anonymous callers at the moment its last
+        credential lapses.
+        """
+        return bool(self._keys)
+
     def has_keys(self) -> bool:
+        """Whether at least one key can authenticate right now."""
         return any(not key["revoked"] and not self.is_expired(key) for key in self._keys)
 
     def create(
