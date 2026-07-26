@@ -16,6 +16,36 @@ raw user prompt
 
 `prompt_improver` ใช้สำหรับ rewrite prompt เท่านั้น ไม่ตอบงานจริง ส่วน `virtual_models` เป็นชื่อที่ client เลือกใช้ เช่น `main-llm-improved` แล้วระบบจะดูว่า virtual model นั้นต้องส่ง final request ไป provider/model ไหน
 
+## การรองรับ Prompt ภาษาไทย
+
+`prompt_improver` ตามค่า default (`lfm2.5-prompt`) เป็นโมเดลเล็ก (1.2B) ที่ไม่แม่นเรื่องภาษาไทยพอที่จะ "แปล + ปรับ prompt" พร้อมกันในขั้นตอนเดียว ระบบจึงตรวจ prompt ก่อนว่ามีอักษรไทย (Unicode range `U+0E00`–`U+0E7F`, เช็คแบบ regex ธรรมดา ไม่เรียกโมเดล ไม่มีต้นทุน) แล้วแยก flow เป็น 2 แบบ:
+
+```text
+Prompt เป็นภาษาไทย:
+  raw Thai prompt
+    -> answer model/provider (แปลไทย -> อังกฤษ)
+    -> English prompt
+    -> prompt improver provider/model (ปรับ prompt เป็นภาษาอังกฤษล้วน)
+    -> improved prompt + คำสั่ง "Respond in Thai."
+    -> answer model/provider (ตอบจริง เป็นภาษาไทย)
+
+Prompt เป็นภาษาอังกฤษ (หรือภาษาอื่นที่ไม่ใช่ไทย):
+  raw prompt
+    -> prompt improver provider/model
+    -> improved prompt
+    -> answer model/provider
+    -> final answer
+```
+
+จุดสำคัญ:
+
+- การแปลไทย -> อังกฤษ ใช้ **โมเดลเดียวกับที่จะตอบคำถามจริง** (เช่น `gemma4-e2b` ผ่าน provider `main`) ไม่ใช่ `lfm2.5-prompt` เพราะโมเดลใหญ่กว่ารองรับภาษาไทยได้ดีกว่าอยู่แล้ว และไม่ต้องเพิ่มโมเดล/provider ใหม่
+- ไม่มีขั้นตอน "แปลคำตอบกลับเป็นไทย" แยกต่างหาก — คำสั่งให้ตอบเป็นไทยจะถูกแนบไปกับ prompt ที่ปรับปรุงแล้วในการเรียกโมเดลตอบจริงรอบเดียวกันเลย รวมทั้งหมด **3 รอบการเรียกโมเดล** (แปล → ปรับ prompt → ตอบ) แทนที่จะเป็น 4 รอบถ้าแยกขั้นตอนแปลคำตอบออกมาต่างหาก
+- สิทธิ์การใช้โมเดล (`scopes.models` ของ API key) ตรวจกับโมเดลที่ใช้แปลด้วย เพราะใช้ selection เดียวกับโมเดลตอบจริงที่ผ่านการตรวจ scope แล้ว จึงไม่เปิดช่องให้ key ที่ถูกจำกัดสิทธิ์ไปเรียกโมเดลอื่นผ่านขั้นตอนแปล
+- ถ้า prompt ไม่มีอักษรไทยเลย พฤติกรรมเดิมทุกอย่างไม่เปลี่ยน (ไม่มีรอบแปลเพิ่ม)
+
+โค้ดอยู่ที่ `services/orchestrator/prompt_service.py` (`contains_thai`, `translate_to_english`) และ `services/orchestrator/service.py::_rewrite_last_user`
+
 ## ตั้งค่า Provider
 
 แก้ไฟล์ `config/models.json`:
