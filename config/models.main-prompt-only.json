@@ -154,12 +154,19 @@
   "mcp": {
     "enabled": true,
     "tool_allowlist": [
+      "browse_dynamic_webpage",
+      "browse_webpage",
       "build_agent_context",
+      "check_browser_capabilities",
+      "fetch_url",
       "get_toolset",
       "list_toolsets",
       "load_skill",
       "load_workflow",
-      "route_request"
+      "open_website",
+      "route_request",
+      "search_web",
+      "search_web_news"
     ]
   }
 }
