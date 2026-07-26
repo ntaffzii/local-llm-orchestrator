@@ -12,6 +12,48 @@ _analyzer = PromptAnalyzer()
 _rule_improver = PromptImprover()
 _templates = TemplateSelector()
 
+_THAI_CHAR_RE = re.compile(r"[฀-๿]")
+
+
+def contains_thai(text: str) -> bool:
+    """Cheap, model-free check for Thai script in text -- no LLM call needed."""
+    return bool(_THAI_CHAR_RE.search(text or ""))
+
+
+async def translate_to_english(
+    client: ProviderClients,
+    text: str,
+    selection: ModelSelection,
+    temperature: float = 0.1,
+    max_tokens: int = 800,
+) -> str:
+    """Translate ``text`` into English using the model that will ultimately answer it.
+
+    The dedicated prompt-improver model (lfm2.5, 1.2B) is unreliable at Thai, so
+    translation is done by the larger answering model first; the improver then only
+    ever sees English, and _rewrite_last_user tells the final answer call to respond
+    in the original language.
+    """
+    payload = {
+        "model": selection.target,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Translate the user's message into English. Preserve its meaning, facts, "
+                    "names, numbers, and technical terms exactly. Output only the translated "
+                    "text -- no explanation, preamble, quotes, or notes."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    response = await client.post_json(selection.provider, "/v1/chat/completions", payload)
+    return response["choices"][0]["message"]["content"].strip()
+
 
 async def improve_prompt(
     client: ProviderClients,

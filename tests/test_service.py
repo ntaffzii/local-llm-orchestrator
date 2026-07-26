@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from services.orchestrator.config import load_model_config
+from services.orchestrator.prompt_service import contains_thai
 from services.orchestrator.registry import ModelRegistry
 from services.orchestrator.router import RequestRouter
 from services.orchestrator.schemas import OrchestrateRequest
@@ -14,6 +15,14 @@ from services.orchestrator.service import OrchestratorService
 
 
 CONFIG = load_model_config(Path(__file__).parents[1] / "config" / "models.json")
+
+
+def test_contains_thai_detects_thai_script_only():
+    assert contains_thai("ช่วยเขียน API ระบบล็อกอิน") is True
+    assert contains_thai("mixed ข้อความ text") is True
+    assert contains_thai("Write a login API") is False
+    assert contains_thai("") is False
+    assert contains_thai(None) is False
 
 
 @pytest.mark.asyncio
@@ -40,6 +49,54 @@ async def test_improved_virtual_model_rewrites_then_calls_main():
     assert client.post_json.await_args_list[1].args[0] == "main"
     assert final_payload["model"] == "gemma4-e2b"
     assert final_payload["messages"][-1]["content"].startswith("Write a documented")
+
+
+@pytest.mark.asyncio
+async def test_thai_prompt_is_translated_before_improvement_and_answered_in_thai():
+    # lfm2.5 (the dedicated prompt-improver) is unreliable at Thai, so Thai input must
+    # be translated by the answering model first (one extra round trip), improved as
+    # plain English by lfm2.5 as usual, then answered with an instruction to respond
+    # in Thai -- no separate "translate the answer back" call.
+    client = AsyncMock()
+    client.post_json.side_effect = [
+        {"choices": [{"message": {"content": "Help write a login API."}}]},
+        {"choices": [{"message": {"content": "Write a documented login API with tests."}}]},
+        {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]},
+    ]
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-improved",
+        messages=[{"role": "user", "content": "ช่วยเขียน API ระบบล็อกอิน"}],
+    )
+
+    response = await service.orchestrate(request)
+
+    assert response["choices"][0]["message"]["content"] == "done"
+    calls = client.post_json.await_args_list
+    assert len(calls) == 3
+
+    # 1. Translate with the *answering* model/provider (not the prompt improver).
+    translate_call = calls[0].args
+    assert translate_call[0] == "main"
+    assert translate_call[2]["model"] == "gemma4-e2b"
+    assert translate_call[2]["messages"][-1]["content"] == "ช่วยเขียน API ระบบล็อกอิน"
+
+    # 2. Improve the now-English text on the dedicated prompt provider, as usual.
+    improve_call = calls[1].args
+    assert improve_call[0] == "prompt"
+    assert improve_call[2]["model"] == "lfm2.5-prompt"
+    assert "Help write a login API." in improve_call[2]["messages"][-1]["content"]
+
+    # 3. Final answer call gets the improved English prompt plus a Thai-response note.
+    # (improve_prompt's real guardrail pass may append extra required-guardrail lines
+    # to the mocked "improved" text, so check the shape rather than an exact match.)
+    final_call = calls[2].args
+    assert final_call[0] == "main"
+    assert final_call[2]["model"] == "gemma4-e2b"
+    final_content = final_call[2]["messages"][-1]["content"]
+    assert final_content.startswith("Write a documented login API with tests.")
+    assert final_content.endswith("\n\nRespond in Thai.")
 
 
 @pytest.mark.asyncio
@@ -147,7 +204,7 @@ async def test_virtual_model_can_use_remote_provider_after_local_prompt_rewrite(
     service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(config)), config)
     request = OrchestrateRequest(
         model="remote-main-improved",
-        messages=[{"role": "user", "content": "ช่วยทำ api"}],
+        messages=[{"role": "user", "content": "help me build an api"}],
     )
 
     response = await service.orchestrate(request)

@@ -12,7 +12,7 @@ import httpx
 
 from .llama_client import ProviderClients, _stream_error_event
 from .mcp_client import McpClient, tool_result_text
-from .prompt_service import improve_prompt
+from .prompt_service import contains_thai, improve_prompt, translate_to_english
 from .registry import ModelSelection
 from .router import RequestRouter
 from .schemas import ChatRequest, OrchestrateRequest
@@ -99,7 +99,7 @@ class OrchestratorService:
             tools_policy = request.use_tools if request.use_tools is not None else selection.use_tools
 
             if self.router.should_improve(improve_policy, request.messages):
-                await self._rewrite_last_user(messages, request.prompt_model, allowed_models)
+                await self._rewrite_last_user(messages, request.prompt_model, allowed_models, selection)
 
             use_tools = self.router.should_use_tools(tools_policy, request.messages)
             if use_tools:
@@ -143,7 +143,7 @@ class OrchestratorService:
                 if self.router.should_improve(improve_policy, request.messages):
                     holder: dict[str, Any] = {}
                     async for chunk in self._yield_heartbeats_while(
-                        self._rewrite_last_user(messages, request.prompt_model, allowed_models),
+                        self._rewrite_last_user(messages, request.prompt_model, allowed_models, selection),
                         holder,
                         self.heartbeat_interval,
                     ):
@@ -215,6 +215,7 @@ class OrchestratorService:
         messages: list[dict[str, Any]],
         prompt_model: str | None,
         allowed_models: set[str] | None = None,
+        answer_selection: ModelSelection | None = None,
     ) -> None:
         target_prompt_model = self.config.get("prompt_improver", {}).get("model") or self.config["routing"]["prompt_model"]
         resolved_prompt_model = prompt_model or target_prompt_model
@@ -227,12 +228,27 @@ class OrchestratorService:
         prompt_selection = self.router.registry.selection(resolved_prompt_model)
         for message in reversed(messages):
             if message.get("role") == "user" and isinstance(message.get("content"), str):
-                message["content"] = await improve_prompt(
+                original = message["content"]
+                # lfm2.5 (the dedicated prompt-improver) is unreliable at Thai. For Thai
+                # input, translate with the model that will actually answer (it handles
+                # Thai fine directly) so the improver only ever sees English, then tell
+                # the final answer call to respond in the original language -- one extra
+                # round trip instead of two (no separate "translate the answer back" call).
+                is_thai = contains_thai(original)
+                text_to_improve = (
+                    await translate_to_english(self.client, original, answer_selection)
+                    if is_thai and answer_selection is not None
+                    else original
+                )
+                improved = await improve_prompt(
                     self.client,
-                    message["content"],
+                    text_to_improve,
                     self.config,
                     selection=prompt_selection,
                 )
+                if is_thai:
+                    improved = f"{improved.rstrip()}\n\nRespond in Thai."
+                message["content"] = improved
                 return
 
     async def _run_tool_loop(
