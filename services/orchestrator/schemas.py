@@ -69,3 +69,13 @@ class PatchMcpToolsRequest(BaseModel):
     set_tools: list[str] | None = None
     allow_tools: list[str] | None = None
     deny_tools: list[str] | None = None
+
+
+class CreateApiKeyRequest(BaseModel):
+    label: str = Field(default="unnamed", max_length=80)
+    models: list[str] = Field(default_factory=list)
+    rate_limit_per_min: int = Field(default=0, ge=0)
+    # None = all tools; [] = no tools; ["a", "b"] = only those.
+    tools: list[str] | None = None
+    # 0 = never expires (default); N = the key stops working N days after creation.
+    expires_in_days: int = Field(default=0, ge=0, le=3650)

@@ -12,6 +12,48 @@ _analyzer = PromptAnalyzer()
 _rule_improver = PromptImprover()
 _templates = TemplateSelector()
 
+_THAI_CHAR_RE = re.compile(r"[฀-๿]")
+
+
+def contains_thai(text: str) -> bool:
+    """Cheap, model-free check for Thai script in text -- no LLM call needed."""
+    return bool(_THAI_CHAR_RE.search(text or ""))
+
+
+async def translate_to_english(
+    client: ProviderClients,
+    text: str,
+    selection: ModelSelection,
+    temperature: float = 0.1,
+    max_tokens: int = 800,
+) -> str:
+    """Translate ``text`` into English using the model that will ultimately answer it.
+
+    The dedicated prompt-improver model (lfm2.5, 1.2B) is unreliable at Thai, so
+    translation is done by the larger answering model first; the improver then only
+    ever sees English, and _rewrite_last_user tells the final answer call to respond
+    in the original language.
+    """
+    payload = {
+        "model": selection.target,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Translate the user's message into English. Preserve its meaning, facts, "
+                    "names, numbers, and technical terms exactly. Output only the translated "
+                    "text -- no explanation, preamble, quotes, or notes."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    response = await client.post_json(selection.provider, "/v1/chat/completions", payload)
+    return response["choices"][0]["message"]["content"].strip()
+
 
 async def improve_prompt(
     client: ProviderClients,
@@ -97,6 +139,11 @@ For fiction prompts, add requirements for concrete stakes, a central conflict, o
 For creative writing prompts, require the final model to return only the creative piece with no explanations, analysis, checklist, or notes after the story unless requested.
 Do not assume current/latest information is known; require verification when the user asks for latest, best now, current, or comparisons.
 Start with a direct imperative instruction for the final model.
+The improved prompt must instruct the final model to directly produce the deliverable itself
+(for example "Write a Python script that adds two numbers", "Implement a function that ..."),
+never an instruction to describe, design, or create a task/spec/plan for someone else to follow
+(for example never start with "Create a coding task for ...", "Design a task that ...", or
+"Write a task description for ..." -- those ask the final model to describe work instead of doing it).
 Do not write generic meta-advice such as "Understand the situation clearly" or "You need a straightforward guide".
 Do not refer to "assumptions defined earlier", "above", or "previous context" unless that content appears inside the improved prompt.
 If a concrete detail is missing, instruct the final model to state assumptions first and use placeholders.
@@ -114,116 +161,207 @@ def _enforce_required_guardrails(improved: str, analysis: Any, original_prompt: 
     if analysis.task_type == "code":
         improved = _replace_redundant_code_placeholders(improved, original_prompt)
     lower = improved.lower()
-    required_lines = []
 
-    if "assumption" not in lower:
-        required_lines.append("State important assumptions before completing the task.")
-    if "placeholder" not in lower:
-        required_lines.append("Use placeholders for important missing details instead of inventing concrete values.")
-
-    if analysis.task_type == "rag":
-        if "source" not in lower:
-            required_lines.append("Use only the provided sources and cite source identifiers when available.")
-        if "insufficient" not in lower and "not contain enough information" not in lower:
-            required_lines.append("Say when the provided sources do not contain enough information.")
-        if "invent" not in lower and "citation" not in lower:
-            required_lines.append("Do not invent citations, URLs, document titles, or source details.")
-    elif analysis.task_type == "code":
-        detail_flags = _provided_code_details(original_prompt)
-        if "minimal implementation" not in lower and "minimal" not in lower:
-            required_lines.append("Provide a minimal implementation.")
-        if "status code" not in lower:
-            required_lines.append("Include expected status codes.")
-        if "error handling" not in lower and "error" not in lower:
-            required_lines.append("Include basic error handling.")
-        if "test" not in lower and "curl" not in lower:
-            required_lines.append("Include a small test example, such as a curl command.")
-        if "hard-coded" not in lower and "fake timestamp" not in lower:
-            required_lines.append("Do not use hard-coded fake timestamps, fake IDs, fake tokens, or fake production values.")
-        if detail_flags["health_check"] and "503" in original_prompt and "internal" not in lower and "dependency" not in lower:
-            required_lines.append("For health checks, return HTTP 503 only when an internal dependency or explicit health-check function fails; do not describe 503 as the response when the application is completely unreachable.")
-        endpoint_path = _provided_endpoint_path(original_prompt)
-        if endpoint_path and endpoint_path.lower() not in lower:
-            required_lines.append(f"Use the exact endpoint path provided by the user: {endpoint_path}.")
-        status_codes = _provided_status_codes(original_prompt)
-        missing_codes = [code for code in status_codes if code not in lower]
-        if missing_codes:
-            required_lines.append(f"Include the exact HTTP status codes provided by the user: {', '.join(status_codes)}.")
-        if not detail_flags["endpoint_path"] and "endpoint path" not in lower and "<endpoint" not in lower:
-            required_lines.append("Use a placeholder such as <endpoint_path> when the endpoint path was not provided.")
-        if not detail_flags["framework"] and "framework" not in lower and "<framework" not in lower:
-            required_lines.append("Use a placeholder such as <framework> when the framework was not provided.")
-        if detail_flags["needs_timestamp"] and "example timestamp" not in lower and "<current_utc_iso_timestamp>" not in lower:
-            required_lines.append("Use placeholders in examples, for example <current_utc_iso_timestamp>, instead of concrete fake timestamps.")
-    elif analysis.task_type == "summary":
-        if "source" not in lower:
-            required_lines.append("Summarize only the provided <source_content>.")
-        if "names" not in lower and "numbers" not in lower:
-            required_lines.append("Preserve important names, numbers, dates, caveats, and uncertainty.")
-        if "do not add" not in lower and "unsupported" not in lower:
-            required_lines.append("Do not add unsupported facts, recommendations, or sentiment.")
-    elif analysis.task_type == "extraction":
-        if "schema" not in lower:
-            required_lines.append("Define the extraction schema with field names, types, and missing-value behavior.")
-        if "json" not in lower:
-            required_lines.append("Return structured JSON only when the user requests structured output.")
-        if "exact text" not in lower:
-            required_lines.append("Preserve exact text for names, IDs, amounts, dates, and quoted values.")
-    elif analysis.task_type == "translation":
-        if "target language" not in lower:
-            required_lines.append("Specify <target_language>, <locale>, and <tone> when they are missing.")
-        if "preserve" not in lower:
-            required_lines.append("Preserve names, terminology, numbers, units, formatting, and meaning.")
-        if "do not" not in lower:
-            required_lines.append("Do not summarize, explain, omit, or add content unless requested.")
-    elif analysis.task_type == "analysis":
-        if "criteria" not in lower:
-            required_lines.append("Define analysis criteria and evidence before conclusions.")
-        if "facts" not in lower:
-            required_lines.append("Separate facts, assumptions, and recommendations.")
-        if "invent" not in lower:
-            required_lines.append("Do not invent data, benchmarks, metrics, sources, dates, or causal claims.")
-    elif analysis.task_type == "creative":
-        if "creative writing" not in lower and "story" not in lower and "fiction" not in lower:
-            required_lines.append("Preserve the creative-writing task; do not convert it into analysis, advice, factual reporting, trends, or educational content.")
-        if original_prompt:
-            required_lines.append(f"Preserve the original creative premise exactly as requested: {original_prompt}")
-        elif "premise" not in lower and "central event" not in lower:
-            required_lines.append("Preserve the original creative premise, genre, subject, and central event from the user's prompt; do not replace them with trends, analysis, or a different topic.")
-        if "genre" not in lower and "tone" not in lower:
-            required_lines.append("Specify genre, tone, audience, point of view, setting, length, and exclusions.")
-        if "stakes" not in lower:
-            required_lines.append("Include concrete stakes and a clear central conflict.")
-        if "decision" not in lower:
-            required_lines.append("Include one meaningful decision scene.")
-        if "scene" not in lower and "action" not in lower:
-            required_lines.append("Show emotion through scene, action, sensory detail, and character choice instead of direct explanation.")
-        if "ending" not in lower:
-            required_lines.append("Specify an ending goal, such as emotional impact or a memorable open ending.")
-        if "generic" not in lower and "overused" not in lower and "cliche" not in lower:
-            required_lines.append("Avoid generic or overused AI-awakening phrases unless explicitly requested.")
-        if "explanation" not in lower and "checklist" not in lower and "notes" not in lower:
-            required_lines.append("Return only the creative piece; do not add explanations, analysis, checklist, or notes after the story unless requested.")
-        if "boundary" not in lower and "limit" not in lower:
-            required_lines.append("Respect content boundaries and exclusions.")
-        if "copyright" not in lower and "real-person" not in lower:
-            required_lines.append("Do not introduce copyrighted characters, real-person likeness requirements, or sensitive details unless provided.")
-    elif analysis.task_type == "qa":
-        if "exact question" not in lower:
-            required_lines.append("Answer the exact question asked.")
-        if "context" not in lower:
-            required_lines.append("Use provided context when the question is context-bound.")
-        if "verify" not in lower and "verification" not in lower:
-            required_lines.append("Require verification for current, legal, medical, or financial claims.")
-        if "latest" not in lower and "current" not in lower and "up-to-date" not in lower:
-            required_lines.append("Do not assume current/latest information is known; require up-to-date verification for latest, best-now, or comparison questions.")
-    else:
-        if "output format" not in lower:
-            required_lines.append("Specify the expected output format.")
-        if "success" not in lower and "criteria" not in lower:
-            required_lines.append("Define success criteria for the final answer.")
+    required_lines = _base_guardrails(lower)
+    handler = _TASK_GUARDRAILS.get(analysis.task_type, _default_guardrails)
+    required_lines.extend(handler(lower, original_prompt))
 
     return _append_guardrails(improved, required_lines)
+
+
+def _base_guardrails(lower: str) -> list[str]:
+    lines: list[str] = []
+    if "assumption" not in lower:
+        lines.append("State important assumptions before completing the task.")
+    if "placeholder" not in lower:
+        lines.append("Use placeholders for important missing details instead of inventing concrete values.")
+    return lines
+
+
+def _rag_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "source" not in lower:
+        lines.append("Use only the provided sources and cite source identifiers when available.")
+    if "insufficient" not in lower and "not contain enough information" not in lower:
+        lines.append("Say when the provided sources do not contain enough information.")
+    if "invent" not in lower and "citation" not in lower:
+        lines.append("Do not invent citations, URLs, document titles, or source details.")
+    return lines
+
+
+def _is_api_like(original_prompt: str) -> bool:
+    """Whether a code task actually involves a network service, not just any script.
+
+    'python'/'debug'/'implement' alone are enough to classify a prompt as task_type
+    "code", which used to make every plain script (e.g. "write python code to add
+    two numbers") get API-specific guardrails (status codes, curl test, endpoint/
+    framework placeholders) -- confusing both the improved prompt and the small
+    main model, which would echo the irrelevant guardrail structure back instead
+    of answering.
+    """
+    lower = original_prompt.lower()
+    api_signals = (
+        "api",
+        "endpoint",
+        "server",
+        "http",
+        "rest",
+        "route",
+        "request",
+        "response",
+        "database",
+        "backend",
+        "service",
+        "url",
+        "webhook",
+        "microservice",
+        "เซิร์ฟเวอร์",
+        "เอพีไอ",
+    )
+    if any(signal in lower for signal in api_signals):
+        return True
+    return bool(_provided_framework(original_prompt))
+
+
+def _code_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "minimal implementation" not in lower and "minimal" not in lower:
+        lines.append("Provide a minimal implementation.")
+    if "error handling" not in lower and "error" not in lower:
+        lines.append("Include basic error handling.")
+    if not _is_api_like(original_prompt):
+        return lines
+
+    detail_flags = _provided_code_details(original_prompt)
+    if "status code" not in lower:
+        lines.append("Include expected status codes.")
+    if "test" not in lower and "curl" not in lower:
+        lines.append("Include a small test example, such as a curl command.")
+    if "hard-coded" not in lower and "fake timestamp" not in lower:
+        lines.append("Do not use hard-coded fake timestamps, fake IDs, fake tokens, or fake production values.")
+    if detail_flags["health_check"] and "503" in original_prompt and "internal" not in lower and "dependency" not in lower:
+        lines.append("For health checks, return HTTP 503 only when an internal dependency or explicit health-check function fails; do not describe 503 as the response when the application is completely unreachable.")
+    endpoint_path = _provided_endpoint_path(original_prompt)
+    if endpoint_path and endpoint_path.lower() not in lower:
+        lines.append(f"Use the exact endpoint path provided by the user: {endpoint_path}.")
+    status_codes = _provided_status_codes(original_prompt)
+    missing_codes = [code for code in status_codes if code not in lower]
+    if missing_codes:
+        lines.append(f"Include the exact HTTP status codes provided by the user: {', '.join(status_codes)}.")
+    if not detail_flags["endpoint_path"] and "endpoint path" not in lower and "<endpoint" not in lower:
+        lines.append("Use a placeholder such as <endpoint_path> when the endpoint path was not provided.")
+    if not detail_flags["framework"] and "framework" not in lower and "<framework" not in lower:
+        lines.append("Use a placeholder such as <framework> when the framework was not provided.")
+    if detail_flags["needs_timestamp"] and "example timestamp" not in lower and "<current_utc_iso_timestamp>" not in lower:
+        lines.append("Use placeholders in examples, for example <current_utc_iso_timestamp>, instead of concrete fake timestamps.")
+    return lines
+
+
+def _summary_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "source" not in lower:
+        lines.append("Summarize only the provided <source_content>.")
+    if "names" not in lower and "numbers" not in lower:
+        lines.append("Preserve important names, numbers, dates, caveats, and uncertainty.")
+    if "do not add" not in lower and "unsupported" not in lower:
+        lines.append("Do not add unsupported facts, recommendations, or sentiment.")
+    return lines
+
+
+def _extraction_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "schema" not in lower:
+        lines.append("Define the extraction schema with field names, types, and missing-value behavior.")
+    if "json" not in lower:
+        lines.append("Return structured JSON only when the user requests structured output.")
+    if "exact text" not in lower:
+        lines.append("Preserve exact text for names, IDs, amounts, dates, and quoted values.")
+    return lines
+
+
+def _translation_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "target language" not in lower:
+        lines.append("Specify <target_language>, <locale>, and <tone> when they are missing.")
+    if "preserve" not in lower:
+        lines.append("Preserve names, terminology, numbers, units, formatting, and meaning.")
+    if "do not" not in lower:
+        lines.append("Do not summarize, explain, omit, or add content unless requested.")
+    return lines
+
+
+def _analysis_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "criteria" not in lower:
+        lines.append("Define analysis criteria and evidence before conclusions.")
+    if "facts" not in lower:
+        lines.append("Separate facts, assumptions, and recommendations.")
+    if "invent" not in lower:
+        lines.append("Do not invent data, benchmarks, metrics, sources, dates, or causal claims.")
+    return lines
+
+
+def _creative_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "creative writing" not in lower and "story" not in lower and "fiction" not in lower:
+        lines.append("Preserve the creative-writing task; do not convert it into analysis, advice, factual reporting, trends, or educational content.")
+    if original_prompt:
+        lines.append(f"Preserve the original creative premise exactly as requested: {original_prompt}")
+    elif "premise" not in lower and "central event" not in lower:
+        lines.append("Preserve the original creative premise, genre, subject, and central event from the user's prompt; do not replace them with trends, analysis, or a different topic.")
+    if "genre" not in lower and "tone" not in lower:
+        lines.append("Specify genre, tone, audience, point of view, setting, length, and exclusions.")
+    if "stakes" not in lower:
+        lines.append("Include concrete stakes and a clear central conflict.")
+    if "decision" not in lower:
+        lines.append("Include one meaningful decision scene.")
+    if "scene" not in lower and "action" not in lower:
+        lines.append("Show emotion through scene, action, sensory detail, and character choice instead of direct explanation.")
+    if "ending" not in lower:
+        lines.append("Specify an ending goal, such as emotional impact or a memorable open ending.")
+    if "generic" not in lower and "overused" not in lower and "cliche" not in lower:
+        lines.append("Avoid generic or overused AI-awakening phrases unless explicitly requested.")
+    if "explanation" not in lower and "checklist" not in lower and "notes" not in lower:
+        lines.append("Return only the creative piece; do not add explanations, analysis, checklist, or notes after the story unless requested.")
+    if "boundary" not in lower and "limit" not in lower:
+        lines.append("Respect content boundaries and exclusions.")
+    if "copyright" not in lower and "real-person" not in lower:
+        lines.append("Do not introduce copyrighted characters, real-person likeness requirements, or sensitive details unless provided.")
+    return lines
+
+
+def _qa_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "exact question" not in lower:
+        lines.append("Answer the exact question asked.")
+    if "context" not in lower:
+        lines.append("Use provided context when the question is context-bound.")
+    if "verify" not in lower and "verification" not in lower:
+        lines.append("Require verification for current, legal, medical, or financial claims.")
+    if "latest" not in lower and "current" not in lower and "up-to-date" not in lower:
+        lines.append("Do not assume current/latest information is known; require up-to-date verification for latest, best-now, or comparison questions.")
+    return lines
+
+
+def _default_guardrails(lower: str, original_prompt: str) -> list[str]:
+    lines: list[str] = []
+    if "output format" not in lower:
+        lines.append("Specify the expected output format.")
+    if "success" not in lower and "criteria" not in lower:
+        lines.append("Define success criteria for the final answer.")
+    return lines
+
+
+_TASK_GUARDRAILS = {
+    "rag": _rag_guardrails,
+    "code": _code_guardrails,
+    "summary": _summary_guardrails,
+    "extraction": _extraction_guardrails,
+    "translation": _translation_guardrails,
+    "analysis": _analysis_guardrails,
+    "creative": _creative_guardrails,
+    "qa": _qa_guardrails,
+}
 
 
 def _append_guardrails(improved: str, required_lines: list[str]) -> str:

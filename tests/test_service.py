@@ -1,9 +1,13 @@
+import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from services.orchestrator.config import load_model_config
+from services.orchestrator.prompt_service import contains_thai
 from services.orchestrator.registry import ModelRegistry
 from services.orchestrator.router import RequestRouter
 from services.orchestrator.schemas import OrchestrateRequest
@@ -11,6 +15,14 @@ from services.orchestrator.service import OrchestratorService
 
 
 CONFIG = load_model_config(Path(__file__).parents[1] / "config" / "models.json")
+
+
+def test_contains_thai_detects_thai_script_only():
+    assert contains_thai("ช่วยเขียน API ระบบล็อกอิน") is True
+    assert contains_thai("mixed ข้อความ text") is True
+    assert contains_thai("Write a login API") is False
+    assert contains_thai("") is False
+    assert contains_thai(None) is False
 
 
 @pytest.mark.asyncio
@@ -31,12 +43,60 @@ async def test_improved_virtual_model_rewrites_then_calls_main():
 
     assert response["choices"][0]["message"]["content"] == "done"
     prompt_call = client.post_json.await_args_list[0].args
-    assert prompt_call[0] == "local"
+    assert prompt_call[0] == "prompt"
     assert prompt_call[2]["model"] == "lfm2.5-prompt"
     final_payload = client.post_json.await_args_list[1].args[2]
-    assert client.post_json.await_args_list[1].args[0] == "local"
+    assert client.post_json.await_args_list[1].args[0] == "main"
     assert final_payload["model"] == "gemma4-e2b"
     assert final_payload["messages"][-1]["content"].startswith("Write a documented")
+
+
+@pytest.mark.asyncio
+async def test_thai_prompt_is_translated_before_improvement_and_answered_in_thai():
+    # lfm2.5 (the dedicated prompt-improver) is unreliable at Thai, so Thai input must
+    # be translated by the answering model first (one extra round trip), improved as
+    # plain English by lfm2.5 as usual, then answered with an instruction to respond
+    # in Thai -- no separate "translate the answer back" call.
+    client = AsyncMock()
+    client.post_json.side_effect = [
+        {"choices": [{"message": {"content": "Help write a login API."}}]},
+        {"choices": [{"message": {"content": "Write a documented login API with tests."}}]},
+        {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]},
+    ]
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-improved",
+        messages=[{"role": "user", "content": "ช่วยเขียน API ระบบล็อกอิน"}],
+    )
+
+    response = await service.orchestrate(request)
+
+    assert response["choices"][0]["message"]["content"] == "done"
+    calls = client.post_json.await_args_list
+    assert len(calls) == 3
+
+    # 1. Translate with the *answering* model/provider (not the prompt improver).
+    translate_call = calls[0].args
+    assert translate_call[0] == "main"
+    assert translate_call[2]["model"] == "gemma4-e2b"
+    assert translate_call[2]["messages"][-1]["content"] == "ช่วยเขียน API ระบบล็อกอิน"
+
+    # 2. Improve the now-English text on the dedicated prompt provider, as usual.
+    improve_call = calls[1].args
+    assert improve_call[0] == "prompt"
+    assert improve_call[2]["model"] == "lfm2.5-prompt"
+    assert "Help write a login API." in improve_call[2]["messages"][-1]["content"]
+
+    # 3. Final answer call gets the improved English prompt plus a Thai-response note.
+    # (improve_prompt's real guardrail pass may append extra required-guardrail lines
+    # to the mocked "improved" text, so check the shape rather than an exact match.)
+    final_call = calls[2].args
+    assert final_call[0] == "main"
+    assert final_call[2]["model"] == "gemma4-e2b"
+    final_content = final_call[2]["messages"][-1]["content"]
+    assert final_content.startswith("Write a documented login API with tests.")
+    assert final_content.endswith("\n\nRespond in Thai.")
 
 
 @pytest.mark.asyncio
@@ -144,13 +204,14 @@ async def test_virtual_model_can_use_remote_provider_after_local_prompt_rewrite(
     service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(config)), config)
     request = OrchestrateRequest(
         model="remote-main-improved",
-        messages=[{"role": "user", "content": "ช่วยทำ api"}],
+        messages=[{"role": "user", "content": "help me build an api"}],
     )
 
     response = await service.orchestrate(request)
 
     assert response["choices"][0]["message"]["content"] == "remote answer"
-    assert client.post_json.await_args_list[0].args[0] == "local"
+    # The prompt rewrite runs on the dedicated prompt provider; the main answer is remote.
+    assert client.post_json.await_args_list[0].args[0] == "prompt"
     assert client.post_json.await_args_list[1].args[0] == "openrouter"
     assert client.post_json.await_args_list[1].args[2]["model"] == "openai/gpt-4.1-mini"
 
@@ -306,3 +367,202 @@ async def test_repeated_tool_call_finishes_without_tools():
             "result_preview": "result",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_allowed_tools_scope_filters_offered_tools():
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "answered without tools"}, "finish_reason": "stop"}]}
+    mcp = AsyncMock()
+    mcp.list_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}
+    ]
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-tools",
+        improve_prompt=False,
+        messages=[{"role": "user", "content": "Search for local LLM information"}],
+    )
+
+    # The key may only use "route_request", so "search" is filtered out -> no tools offered.
+    response = await service.orchestrate(request, allowed_tools={"route_request"})
+
+    assert response["choices"][0]["message"]["content"] == "answered without tools"
+    mcp.call_tool.assert_not_awaited()
+    payload = client.post_json.await_args_list[0].args[2]
+    assert "tools" not in payload
+
+
+@pytest.mark.asyncio
+async def test_allowed_models_scope_blocks_prompt_model_override():
+    # A key scoped to a specific set of models must not be able to redirect
+    # prompt-improvement to a model outside that scope via `prompt_model` -- that
+    # would let a restricted key reach an unauthorized model/provider.
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm",
+        improve_prompt=True,
+        prompt_model="coding",
+        messages=[{"role": "user", "content": "Build API"}],
+    )
+
+    with pytest.raises(PermissionError):
+        await service.orchestrate(request, allowed_models={"main-llm"})
+
+    # No upstream call should have been made -- the check happens before any call.
+    client.post_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_streams_real_tokens_after_prompt_improvement():
+    # The improved-prompt path should still block through the (fast, mocked) rewrite
+    # call, but the final generation must come through as real incremental chunks
+    # from client.stream(), not one buffered chunk after everything finishes.
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "Write a documented REST API."}}]}
+
+    async def fake_stream(provider, path, payload):
+        assert provider == "main"
+        assert payload["stream"] is True
+        assert payload["messages"][-1]["content"].startswith("Write a documented REST API.")
+        yield b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    # client.stream must return an async iterator directly (like the real
+    # ProviderClients.stream(), an async-generator function) -- AsyncMock's default
+    # call machinery returns a coroutine instead, which `async for` can't consume.
+    client.stream = fake_stream
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert chunks == [
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    prompt_call = client.post_json.await_args_list[0].args
+    assert prompt_call[0] == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_sends_heartbeats_while_blocked():
+    # With a near-zero heartbeat interval, a slow (mocked) prompt-improve call must
+    # surface keep-alive SSE comments before the final streamed content -- otherwise
+    # the connection looks dead to clients for the whole blocking duration.
+    client = AsyncMock()
+
+    async def slow_post_json(provider, path, payload):
+        await asyncio.sleep(0.05)
+        return {"choices": [{"message": {"content": "Improved."}}]}
+
+    client.post_json.side_effect = slow_post_json
+
+    async def fake_stream(provider, path, payload):
+        yield b"data: [DONE]\n\n"
+
+    client.stream = fake_stream
+    mcp = AsyncMock()
+    service = OrchestratorService(
+        client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG, heartbeat_interval=0.01
+    )
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert chunks.count(b": keep-alive\n\n") > 0
+    assert chunks[-1] == b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_on_upstream_failure_during_improve():
+    # A blocking phase (prompt-improve here) now runs *inside* the streaming
+    # generator, after the ASGI response has already committed to 200 -- an
+    # unhandled exception here would crash the app the same way the old
+    # non-streaming upstream-error bug did. It must degrade to an SSE error event.
+    client = AsyncMock()
+    upstream_response = httpx.Response(400, json={"error": "context length exceeded"}, request=httpx.Request("POST", "http://x"))
+    client.post_json.side_effect = httpx.HTTPStatusError("bad request", request=upstream_response.request, response=upstream_response)
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="main-llm-improved", messages=[{"role": "user", "content": "Build API"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    assert body.startswith("data: ")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 400
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_on_unknown_model():
+    # registry.selection() raises a plain KeyError for an unknown model id -- that is
+    # not an httpx exception, so it must be caught separately or it crashes the ASGI
+    # app mid-stream (the response has already committed to 200 by this point) the
+    # same way unhandled upstream errors used to.
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(model="does-not-exist", messages=[{"role": "user", "content": "hi"}])
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request)]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 404
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_emits_sse_error_when_prompt_model_outside_scope():
+    client = AsyncMock()
+    mcp = AsyncMock()
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm",
+        improve_prompt=True,
+        prompt_model="coding",
+        messages=[{"role": "user", "content": "Build API"}],
+    )
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request, allowed_models={"main-llm"})]
+
+    assert len(chunks) == 1
+    body = chunks[0].decode("utf-8")
+    event = json.loads(body.split("\n\n")[0][len("data: "):])
+    assert event["error"]["status"] == 403
+    client.post_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_stream_tool_loop_stays_buffered_as_single_chunk():
+    # Tool-loop responses can't be split into real tokens after the fact (the tool
+    # trace only exists once the whole loop finishes), so this path stays a single
+    # buffered SSE chunk -- confirm it still round-trips correctly through the
+    # streaming entrypoint.
+    client = AsyncMock()
+    client.post_json.return_value = {"choices": [{"message": {"content": "answered without tools"}, "finish_reason": "stop"}]}
+    mcp = AsyncMock()
+    mcp.list_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}
+    ]
+    service = OrchestratorService(client, mcp, RequestRouter(ModelRegistry(CONFIG)), CONFIG)
+    request = OrchestrateRequest(
+        model="main-llm-tools", improve_prompt=False, messages=[{"role": "user", "content": "Search"}]
+    )
+
+    chunks = [chunk async for chunk in service.orchestrate_stream(request, allowed_tools={"route_request"})]
+
+    assert len(chunks) == 2
+    assert chunks[1] == b"data: [DONE]\n\n"
+    event = json.loads(chunks[0].decode("utf-8")[len("data: "):].split("\n\n")[0])
+    assert event["choices"][0]["delta"]["content"] == "answered without tools"

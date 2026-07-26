@@ -2,10 +2,40 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import json
 import os
+import re
 from typing import Any
 
 import httpx
+
+
+_ENV_REF = re.compile(r"^\$\{(\w+)\}$")
+
+
+def resolve_base_url(raw: str | None, default: str) -> str:
+    """Resolve a provider base_url, expanding a ``${ENV_VAR}`` reference.
+
+    An unset or empty env var (or an empty literal) falls back to ``default`` so a
+    provider can point at a dedicated service in one deployment and transparently
+    reuse the shared router in another.
+    """
+    value = (raw or "").strip()
+    match = _ENV_REF.match(value)
+    if match:
+        return os.getenv(match.group(1), "").strip() or default
+    return value or default
+
+
+def _stream_error_event(status_code: int, body: bytes) -> bytes:
+    try:
+        detail: Any = json.loads(body)
+    except ValueError:
+        detail = body.decode("utf-8", errors="replace")
+    payload = json.dumps(
+        {"error": {"code": "upstream_error", "status": status_code, "message": detail}}, ensure_ascii=False
+    )
+    return f"data: {payload}\n\ndata: [DONE]\n\n".encode("utf-8")
 
 
 class LlamaClient:
@@ -44,12 +74,32 @@ class LlamaClient:
         assert last_error is not None
         raise last_error
 
+    async def ping(self, path: str = "/health", timeout: float = 2.0) -> Any:
+        # A single-attempt, short-timeout probe for readiness checks -- retries and the
+        # long request timeout make a health snapshot needlessly slow.
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(self._url(path), headers=self._headers())
+            response.raise_for_status()
+            return response.json()
+
     async def stream(self, path: str, payload: dict[str, Any]) -> AsyncIterator[bytes]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", self._url(path), json=payload, headers=self._headers()) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_raw():
-                    yield chunk
+        # StreamingResponse sends HTTP 200 the moment the first chunk is requested, so
+        # by the time an upstream error is known here the status line is already on the
+        # wire and cannot be changed. Letting raise_for_status() propagate crashes the
+        # ASGI app mid-stream with an unhandled exception (e.g. on a context-length 400
+        # from llama.cpp) instead of telling the client anything. Emit one well-formed
+        # SSE error event and end the stream cleanly instead.
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", self._url(path), json=payload, headers=self._headers()) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        yield _stream_error_event(response.status_code, body)
+                        return
+                    async for chunk in response.aiter_raw():
+                        yield chunk
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            yield _stream_error_event(503, str(exc).encode("utf-8"))
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -75,7 +125,7 @@ class ProviderClients:
         provider_config.setdefault("local", {"base_url": default_base_url})
         self.clients = {
             name: LlamaClient(
-                details.get("base_url", default_base_url),
+                resolve_base_url(details.get("base_url"), default_base_url),
                 timeout,
                 attempts=attempts,
                 backoff=backoff,
@@ -86,6 +136,9 @@ class ProviderClients:
 
     async def get_json(self, provider: str, path: str) -> Any:
         return await self._client(provider).get_json(path)
+
+    async def ping(self, provider: str, timeout: float = 2.0) -> Any:
+        return await self._client(provider).ping(timeout=timeout)
 
     async def post_json(self, provider: str, path: str, payload: dict[str, Any]) -> Any:
         return await self._client(provider).post_json(path, payload)

@@ -43,16 +43,24 @@ services:
       ORCHESTRATOR_PORT: "8090"
       ORCHESTRATOR_WORKERS: "1"
       ORCHESTRATOR_API_KEY: ${ORCHESTRATOR_API_KEY:?Set ORCHESTRATOR_API_KEY in .env}
+      ORCHESTRATOR_ADMIN_API_KEY: ${ORCHESTRATOR_ADMIN_API_KEY:-}
+      TRUST_FORWARDED_FOR: ${TRUST_FORWARDED_FOR:-false}
+      ADMIN_UI_ENABLED: ${ADMIN_UI_ENABLED:-true}
+      AUDIT_LOG_PATH: ${AUDIT_LOG_PATH:-}
       ORCHESTRATOR_LOG_LEVEL: ${ORCHESTRATOR_LOG_LEVEL:-INFO}
       ORCHESTRATOR_CORS_ORIGINS: ${ORCHESTRATOR_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       LLAMA_BASE_URL: http://llama-router:8080
-      MODEL_CONFIG_PATH: /app/config/models.json
+      LLAMA_MAIN_URL: ${LLAMA_MAIN_URL:-}
+      LLAMA_PROMPT_URL: ${LLAMA_PROMPT_URL:-}
+      MODEL_CONFIG_PATH: /app/config/${MODEL_CONFIG_FILE:-models.json}
       REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-300}
       MCP_ENABLED: ${MCP_ENABLED:-false}
       MCP_SERVER_URL: ${MCP_SERVER_URL:-http://host.docker.internal:8765/mcp}
       MCP_TOOL_ALLOWLIST: ${MCP_TOOL_ALLOWLIST:-}
     volumes:
-      - ./config/models.json:/app/config/models.json
+      # Mount the whole config dir (not just models.json) so runtime files such as
+      # api_keys.json persist and atomic replace works within one filesystem.
+      - ./config:/app/config
     ports:
       - "${ORCHESTRATOR_BIND_IP:-127.0.0.1}:${ORCHESTRATOR_PORT:-8090}:8090"
     extra_hosts:
@@ -64,6 +72,60 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=128m
+
+  # Optional single-model services you can toggle on/off from the admin console.
+  # Bring them up once so they exist to be controlled:
+  #   docker compose --profile models up -d
+  # Toggling on/off from the console additionally needs compose.docker-control.yaml.
+  llama-main:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    profiles: ["models"]
+    restart: unless-stopped
+    command:
+      - -m
+      - /models/${LLAMA_MAIN_MODEL:-chat/gemma-4-E2B-it-Uncensored-MAX.Q4_K_S.gguf}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - ${LLAMA_CTX_SIZE:-8192}
+      - -ngl
+      - ${LLAMA_GPU_LAYERS:-0}
+      - --no-webui
+    volumes:
+      - ./models:/models:ro
+    expose:
+      - "8080"
+    networks:
+      - llm-internal
+    security_opt:
+      - no-new-privileges:true
+
+  llama-prompt:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    profiles: ["models"]
+    restart: unless-stopped
+    command:
+      - -m
+      - /models/${LLAMA_PROMPT_MODEL:-prompt/LFM2.5-1.2B-Instruct-Q8_0.gguf}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - ${LLAMA_CTX_SIZE:-8192}
+      - -ngl
+      - ${LLAMA_GPU_LAYERS:-0}
+      - --no-webui
+    volumes:
+      - ./models:/models:ro
+    expose:
+      - "8080"
+    networks:
+      - llm-internal
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   llm-internal:

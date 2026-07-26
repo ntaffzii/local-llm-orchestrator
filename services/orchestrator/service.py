@@ -1,16 +1,65 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterator
 import json
+import time
+import uuid
 from copy import deepcopy
 from typing import Any
 
-from .llama_client import ProviderClients
+import httpx
+
+from .llama_client import ProviderClients, _stream_error_event
 from .mcp_client import McpClient, tool_result_text
-from .prompt_service import improve_prompt
+from .prompt_service import contains_thai, improve_prompt, translate_to_english
 from .registry import ModelSelection
 from .router import RequestRouter
 from .schemas import ChatRequest, OrchestrateRequest
+
+
+def completion_as_sse(response: dict[str, Any]) -> Iterator[bytes]:
+    """Wrap one already-complete chat.completion dict as a single SSE chunk.
+
+    Used for legacy/tool-loop responses that were built by fully blocking calls and
+    can't be streamed token-by-token after the fact.
+    """
+    choice = response.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    chunk_id = response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
+    created = response.get("created", int(time.time()))
+    model = response.get("model", "local-orchestrator")
+    reasoning = message.get("reasoning_content", "")
+    if reasoning:
+        reasoning_chunk = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": choice.get("index", 0),
+                    "delta": {"role": "assistant", "reasoning_content": reasoning},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": choice.get("index", 0),
+                "delta": {"role": "assistant", "content": message.get("content", "")},
+                "finish_reason": choice.get("finish_reason", "stop"),
+            }
+        ],
+    }
+    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+    yield b"data: [DONE]\n\n"
 
 
 class OrchestratorService:
@@ -20,11 +69,13 @@ class OrchestratorService:
         mcp: McpClient,
         router: RequestRouter,
         config: dict[str, Any],
+        heartbeat_interval: float = 12.0,
     ) -> None:
         self.client = client
         self.mcp = mcp
         self.router = router
         self.config = config
+        self.heartbeat_interval = heartbeat_interval
         limit = int(config["orchestration"].get("max_concurrent_workflows", 2))
         self.workflow_slots = asyncio.Semaphore(max(1, limit))
 
@@ -35,7 +86,12 @@ class OrchestratorService:
         self._apply_defaults(payload, selection)
         return payload, selection
 
-    async def orchestrate(self, request: OrchestrateRequest) -> dict[str, Any]:
+    async def orchestrate(
+        self,
+        request: OrchestrateRequest,
+        allowed_tools: set[str] | None = None,
+        allowed_models: set[str] | None = None,
+    ) -> dict[str, Any]:
         async with self.workflow_slots:
             selection = self.router.route(request.model, request.messages)
             messages = [message.model_dump(exclude_none=True) for message in request.messages]
@@ -43,7 +99,7 @@ class OrchestratorService:
             tools_policy = request.use_tools if request.use_tools is not None else selection.use_tools
 
             if self.router.should_improve(improve_policy, request.messages):
-                await self._rewrite_last_user(messages, request.prompt_model)
+                await self._rewrite_last_user(messages, request.prompt_model, allowed_models, selection)
 
             use_tools = self.router.should_use_tools(tools_policy, request.messages)
             if use_tools:
@@ -56,23 +112,148 @@ class OrchestratorService:
             self._apply_defaults(payload, selection)
 
             if use_tools:
-                return await self._run_tool_loop(selection.provider, payload)
+                return await self._run_tool_loop(selection.provider, payload, allowed_tools)
             return await self.client.post_json(selection.provider, "/v1/chat/completions", payload)
 
-    async def _rewrite_last_user(self, messages: list[dict[str, Any]], prompt_model: str | None) -> None:
+    async def orchestrate_stream(
+        self,
+        request: OrchestrateRequest,
+        allowed_tools: set[str] | None = None,
+        allowed_models: set[str] | None = None,
+    ) -> AsyncIterator[bytes]:
+        """Like orchestrate(), but streams the final answer as it's generated instead
+        of buffering the whole multi-stage pipeline before sending any bytes.
+
+        On a CPU-only host, prompt-improvement + generation can each take tens of
+        seconds. orchestrate() blocks through both stages before StreamingResponse
+        ever sends a byte, which looks like a dead connection to clients such as Open
+        WebUI -- they can give up waiting before the single buffered chunk arrives.
+        This yields SSE keep-alive comments during blocking stages and switches to
+        real token streaming for the final (non-tool) generation call.
+        """
+        try:
+            async with self.workflow_slots:
+                selection = self.router.route(request.model, request.messages)
+                messages = [message.model_dump(exclude_none=True) for message in request.messages]
+                improve_policy = (
+                    request.improve_prompt if request.improve_prompt is not None else selection.improve_prompt
+                )
+                tools_policy = request.use_tools if request.use_tools is not None else selection.use_tools
+
+                if self.router.should_improve(improve_policy, request.messages):
+                    holder: dict[str, Any] = {}
+                    async for chunk in self._yield_heartbeats_while(
+                        self._rewrite_last_user(messages, request.prompt_model, allowed_models, selection),
+                        holder,
+                        self.heartbeat_interval,
+                    ):
+                        yield chunk
+
+                use_tools = self.router.should_use_tools(tools_policy, request.messages)
+                if use_tools:
+                    self._inject_skill_agent_prompt(messages)
+
+                payload = request.model_dump(exclude_none=True)
+                for key in ("improve_prompt", "use_tools", "prompt_model"):
+                    payload.pop(key, None)
+                payload.update({"model": selection.target, "messages": messages})
+                self._apply_defaults(payload, selection)
+
+                if use_tools:
+                    # Tool rounds involve non-final intermediate calls; only the last
+                    # round has visible output, and by the time it's known to be last
+                    # the call has already been made. Keep this path buffered but
+                    # heartbeat through it so the connection doesn't look dead.
+                    payload["stream"] = False
+                    tool_holder: dict[str, Any] = {}
+                    async for chunk in self._yield_heartbeats_while(
+                        self._run_tool_loop(selection.provider, payload, allowed_tools),
+                        tool_holder,
+                        self.heartbeat_interval,
+                    ):
+                        yield chunk
+                    for chunk in completion_as_sse(tool_holder["value"]):
+                        yield chunk
+                    return
+
+                payload["stream"] = True
+                async for chunk in self.client.stream(selection.provider, "/v1/chat/completions", payload):
+                    yield chunk
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 503
+            yield _stream_error_event(status_code, str(exc).encode("utf-8"))
+        except KeyError as exc:
+            # An unknown model/prompt_model. StreamingResponse has already sent its 200
+            # status line by the time this generator runs, so the only way to tell the
+            # client is a clean SSE error event -- the route handler's `except KeyError`
+            # never sees this, it only wraps the (already-returned) StreamingResponse.
+            yield _stream_error_event(404, f"model_not_found: {exc}".encode("utf-8"))
+        except PermissionError as exc:
+            yield _stream_error_event(403, str(exc).encode("utf-8"))
+
+    @staticmethod
+    async def _yield_heartbeats_while(
+        coro: Any, result_holder: dict[str, Any], interval: float = 12.0
+    ) -> AsyncIterator[bytes]:
+        task = asyncio.ensure_future(coro)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if task in done:
+                    break
+                # SSE comment line: ignored by any spec-compliant client, but keeps
+                # bytes flowing so idle-read timeouts on proxies/clients don't fire
+                # while a blocking model call is still in flight.
+                yield b": keep-alive\n\n"
+            result_holder["value"] = await task
+        except BaseException:
+            task.cancel()
+            raise
+
+    async def _rewrite_last_user(
+        self,
+        messages: list[dict[str, Any]],
+        prompt_model: str | None,
+        allowed_models: set[str] | None = None,
+        answer_selection: ModelSelection | None = None,
+    ) -> None:
         target_prompt_model = self.config.get("prompt_improver", {}).get("model") or self.config["routing"]["prompt_model"]
-        prompt_selection = self.router.registry.selection(prompt_model or target_prompt_model)
+        resolved_prompt_model = prompt_model or target_prompt_model
+        # A caller can only override the prompt-improvement model with one already in
+        # its own model scope -- otherwise a key restricted to model A could smuggle
+        # inference to model B (or an unrelated provider) via `prompt_model` even
+        # though it never had scope to call B directly.
+        if allowed_models is not None and resolved_prompt_model not in allowed_models:
+            raise PermissionError(f"This key cannot use model: {resolved_prompt_model}")
+        prompt_selection = self.router.registry.selection(resolved_prompt_model)
         for message in reversed(messages):
             if message.get("role") == "user" and isinstance(message.get("content"), str):
-                message["content"] = await improve_prompt(
+                original = message["content"]
+                # lfm2.5 (the dedicated prompt-improver) is unreliable at Thai. For Thai
+                # input, translate with the model that will actually answer (it handles
+                # Thai fine directly) so the improver only ever sees English, then tell
+                # the final answer call to respond in the original language -- one extra
+                # round trip instead of two (no separate "translate the answer back" call).
+                is_thai = contains_thai(original)
+                text_to_improve = (
+                    await translate_to_english(self.client, original, answer_selection)
+                    if is_thai and answer_selection is not None
+                    else original
+                )
+                improved = await improve_prompt(
                     self.client,
-                    message["content"],
+                    text_to_improve,
                     self.config,
                     selection=prompt_selection,
                 )
+                if is_thai:
+                    improved = f"{improved.rstrip()}\n\nRespond in Thai."
+                message["content"] = improved
                 return
 
-    async def _run_tool_loop(self, provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _run_tool_loop(
+        self, provider: str, payload: dict[str, Any], allowed_tools: set[str] | None = None
+    ) -> dict[str, Any]:
         tool_trace: list[dict[str, Any]] = []
         try:
             tools = await self.mcp.list_openai_tools()
@@ -98,6 +279,9 @@ class OrchestratorService:
                     }
                 ],
             )
+        if allowed_tools is not None:
+            # Per-key tools scope: only offer the tools this key may use.
+            tools = [tool for tool in tools if (tool.get("function") or {}).get("name") in allowed_tools]
         if not tools:
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
@@ -133,10 +317,16 @@ class OrchestratorService:
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments or "{}")
                 seen_tool_calls.add(self._tool_call_signature(function["name"], arguments))
-                try:
-                    result = await self.mcp.call_tool(function["name"], arguments)
-                except Exception as exc:
-                    result = {"is_error": True, "content": [{"type": "text", "text": f"MCP tool failed: {exc}"}]}
+                if allowed_tools is not None and function["name"] not in allowed_tools:
+                    result = {
+                        "is_error": True,
+                        "content": [{"type": "text", "text": f"Tool not permitted for this key: {function['name']}"}],
+                    }
+                else:
+                    try:
+                        result = await self.mcp.call_tool(function["name"], arguments)
+                    except Exception as exc:
+                        result = {"is_error": True, "content": [{"type": "text", "text": f"MCP tool failed: {exc}"}]}
                 tool_trace.append(
                     {
                         "round": tool_rounds + 1,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import secrets
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
@@ -16,15 +19,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from prompt_engine import consult_prompt
 
 from .admin_ui import admin_ui_html
-from .config import get_settings, load_model_config, save_model_config
+from .api_keys import ApiKeyStore
+from .config import get_settings, load_model_config, save_model_config, validate_model_config
+from .docker_control import DockerControl, DockerControlDisabled, DockerControlError
 from .llama_client import ProviderClients
 from .mcp_client import McpClient
+from .metrics import MetricsStore
 from .prompt_service import improve_prompt
 from .registry import ModelRegistry
 from .router import RequestRouter
 from .schemas import (
     ChatRequest,
     ConsultPromptRequest,
+    CreateApiKeyRequest,
     ImprovePromptRequest,
     OrchestrateRequest,
     PatchMcpToolsRequest,
@@ -32,7 +39,7 @@ from .schemas import (
     UpdatePromptImproverRequest,
     UpdateVirtualModelRequest,
 )
-from .service import OrchestratorService
+from .service import OrchestratorService, completion_as_sse
 
 
 settings = get_settings()
@@ -42,9 +49,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("local_llm.orchestrator")
 
+# Paths whose latency/success feed the traffic metrics.
+INFERENCE_PATHS = {"/v1/chat/completions", "/orchestrate/chat", "/prompt/improve"}
+metrics_store = MetricsStore()
+docker_control = DockerControl(
+    settings.docker_control_enabled, settings.docker_socket, settings.docker_compose_project
+)
+api_key_store = ApiKeyStore(settings.api_keys_path)
 
-def build_components() -> tuple[dict[str, Any], ModelRegistry, RequestRouter, ProviderClients, McpClient, OrchestratorService]:
-    config = load_model_config(settings.model_config_path)
+
+def build_components(
+    config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ModelRegistry, RequestRouter, ProviderClients, McpClient, OrchestratorService]:
+    if config is None:
+        config = load_model_config(settings.model_config_path)
+    else:
+        validate_model_config(config)
     registry = ModelRegistry(config)
     router = RequestRouter(registry)
     orchestration = config["orchestration"]
@@ -116,6 +136,13 @@ async def request_context(request: Request, call_next):
         raise
     response.headers["X-Request-ID"] = request_id
     elapsed_ms = (time.perf_counter() - started) * 1000
+    if request.url.path in INFERENCE_PATHS:
+        metrics_store.record(
+            model=getattr(request.state, "metric_model", "unknown"),
+            latency_ms=elapsed_ms,
+            ok=response.status_code < 400,
+            key=getattr(request.state, "api_key_label", "anonymous"),
+        )
     logger.info(
         "request_complete id=%s method=%s path=%s status=%s elapsed_ms=%.1f",
         request_id,
@@ -127,18 +154,202 @@ async def request_context(request: Request, call_next):
     return response
 
 
-def require_api_key(authorization: str | None = Header(default=None)) -> None:
-    if settings.api_key and authorization != f"Bearer {settings.api_key}":
-        raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
+class AuthThrottle:
+    """Small in-process throttle that locks out an IP after repeated auth failures.
+
+    This is defence-in-depth for a locally exposed admin API, not a substitute for a
+    real WAF. State is per-process and resets on restart -- with
+    ORCHESTRATOR_WORKERS > 1 each worker throttles independently, so the effective
+    lockout threshold is multiplied by the worker count. Keep workers at 1, or put a
+    real rate limiter in the reverse proxy, if this throttle is load-bearing.
+    """
+
+    def __init__(self, max_failures: int = 10, window_seconds: float = 60.0, lockout_seconds: float = 300.0) -> None:
+        self.max_failures = max_failures
+        self.window = window_seconds
+        self.lockout = lockout_seconds
+        self._failures: dict[str, list[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def check(self, ip: str) -> None:
+        locked_until = self._locked_until.get(ip)
+        if locked_until and time.time() < locked_until:
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "too_many_attempts", "message": "Too many failed authentication attempts. Try again later."},
+            )
+
+    def record_failure(self, ip: str) -> None:
+        now = time.time()
+        recent = [t for t in self._failures.get(ip, []) if t >= now - self.window]
+        recent.append(now)
+        if len(recent) >= self.max_failures:
+            self._locked_until[ip] = now + self.lockout
+            self._failures.pop(ip, None)
+        else:
+            self._failures[ip] = recent
+
+    def record_success(self, ip: str) -> None:
+        self._failures.pop(ip, None)
+        self._locked_until.pop(ip, None)
+
+    def reset(self) -> None:
+        self._failures.clear()
+        self._locked_until.clear()
 
 
-def require_admin_api_key(authorization: str | None = Header(default=None)) -> None:
-    if not settings.api_key:
+# Inference and admin auth get separate throttle state. Sharing one bucket lets a
+# noisy inference client (wrong/expired key, retry loop) burn the failure budget for
+# its whole source IP and lock the admin out of the console -- a self-inflicted
+# denial of the recovery path, from clients that never touch /admin at all. This is
+# especially easy to hit when several people share one egress IP behind NAT.
+auth_throttle = AuthThrottle()
+admin_auth_throttle = AuthThrottle()
+
+
+class RateLimiter:
+    """Per-key sliding-window request limiter (requests per minute). In-process.
+
+    Per-process, like AuthThrottle: with ORCHESTRATOR_WORKERS > 1 a key's effective
+    limit is multiplied by the worker count.
+    """
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key_id: str, limit_per_min: int) -> bool:
+        if not limit_per_min or limit_per_min <= 0:
+            return True
+        now = time.time()
+        window = self._hits.setdefault(key_id, deque())
+        cutoff = now - 60.0
+        while window and window[0] < cutoff:
+            window.popleft()
+        if len(window) >= limit_per_min:
+            return False
+        window.append(now)
+        return True
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+rate_limiter = RateLimiter()
+
+
+def _client_ip(request: Request) -> str:
+    if settings.trust_forwarded_for:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            # Left-most entry is the original client when set by a trusted proxy.
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _bearer_matches(authorization: str | None, expected: str) -> bool:
+    if not authorization:
+        return False
+    return secrets.compare_digest(authorization, f"Bearer {expected}")
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return authorization[len("Bearer ") :]
+
+
+def require_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
+    # Open mode only when no auth was ever configured (root key unset and no managed key
+    # has ever been issued). Note this asks "is auth configured", NOT "is a key currently
+    # valid" -- keying it on validity would make a managed-keys-only deployment fall open
+    # to anonymous callers the moment its last key expired or was revoked.
+    if not settings.api_key and not api_key_store.is_configured():
+        return
+    ip = _client_ip(request)
+    auth_throttle.check(ip)
+    token = _bearer_token(authorization)
+    if token:
+        if settings.api_key and secrets.compare_digest(token, settings.api_key):
+            request.state.api_key_label = "root"
+            request.state.api_key = None  # root key is unrestricted
+            auth_throttle.record_success(ip)
+            return
+        record = api_key_store.verify(token)
+        if record is not None:
+            auth_throttle.record_success(ip)
+            if not rate_limiter.allow(record["id"], record.get("rate_limit_per_min", 0)):
+                raise HTTPException(
+                    status_code=429,
+                    detail={"code": "rate_limited", "message": "Per-key request rate limit exceeded."},
+                )
+            request.state.api_key_label = record["label"]
+            request.state.api_key = record
+            return
+    auth_throttle.record_failure(ip)
+    raise HTTPException(status_code=401, detail={"code": "invalid_api_key", "message": "Invalid API key"})
+
+
+def require_admin_api_key(request: Request, authorization: str | None = Header(default=None)) -> None:
+    admin_key = settings.admin_api_key or settings.api_key
+    if not admin_key:
         raise HTTPException(
             status_code=401,
-            detail={"code": "api_key_required", "message": "Set ORCHESTRATOR_API_KEY before using admin APIs"},
+            detail={
+                "code": "api_key_required",
+                "message": "Set ORCHESTRATOR_ADMIN_API_KEY (or ORCHESTRATOR_API_KEY) before using admin APIs",
+            },
         )
-    require_api_key(authorization)
+    ip = _client_ip(request)
+    admin_auth_throttle.check(ip)
+    if not _bearer_matches(authorization, admin_key):
+        admin_auth_throttle.record_failure(ip)
+        logger.warning("admin_auth_failed ip=%s path=%s", ip, request.url.path)
+        raise HTTPException(status_code=401, detail={"code": "invalid_admin_api_key", "message": "Invalid admin API key"})
+    admin_auth_throttle.record_success(ip)
+
+
+def enforce_model_scope(http_request: Request, model: str) -> None:
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return  # root key / open mode is unrestricted
+    allowed = (record.get("scopes") or {}).get("models") or []
+    if allowed and model not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "model_forbidden", "message": f"This key cannot use model: {model}", "allowed": allowed},
+        )
+
+
+def key_model_scope(http_request: Request) -> set[str] | None:
+    """Return the key's model allowlist, or None for unrestricted (root / all-models).
+
+    Used to also gate client-suppliable model overrides that bypass the top-level
+    `model` field (e.g. `prompt_model`), so a scoped key cannot reach a model outside
+    its `scopes.models` allowlist through a side channel.
+    """
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return None
+    allowed = (record.get("scopes") or {}).get("models") or []
+    return set(allowed) if allowed else None
+
+
+def key_tools_scope(http_request: Request) -> set[str] | None:
+    """Return the key's tool allowlist, or None for unrestricted (root / all-tools)."""
+    record = getattr(http_request.state, "api_key", None)
+    if not record:
+        return None
+    tools = (record.get("scopes") or {}).get("tools")
+    return None if tools is None else set(tools)
+
+
+def enforce_tool_scope(http_request: Request, tool_name: str) -> None:
+    allowed = key_tools_scope(http_request)
+    if allowed is not None and tool_name not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "tool_forbidden", "message": f"This key cannot use tool: {tool_name}"},
+        )
 
 
 def upstream_error(exc: httpx.HTTPStatusError) -> HTTPException:
@@ -199,45 +410,6 @@ def consultation_completion(prompt: str, model: str = "prompt-consultant") -> di
     }
 
 
-def completion_as_sse(response: dict[str, Any]):
-    choice = response.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    chunk_id = response.get("id", f"chatcmpl-{uuid.uuid4().hex}")
-    created = response.get("created", int(time.time()))
-    model = response.get("model", "local-orchestrator")
-    reasoning = message.get("reasoning_content", "")
-    if reasoning:
-        reasoning_chunk = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": choice.get("index", 0),
-                    "delta": {"role": "assistant", "reasoning_content": reasoning},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        yield f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    chunk = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": choice.get("index", 0),
-                "delta": {"role": "assistant", "content": message.get("content", "")},
-                "finish_reason": choice.get("finish_reason", "stop"),
-            }
-        ],
-    }
-    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-    yield b"data: [DONE]\n\n"
-
-
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {"status": "ok", "service": "local-llm-orchestrator", "version": app.version}
@@ -245,28 +417,64 @@ async def health() -> dict[str, Any]:
 
 @app.get("/admin/ui", response_class=HTMLResponse)
 async def admin_ui() -> HTMLResponse:
+    if not settings.admin_ui_enabled:
+        raise HTTPException(status_code=404, detail={"code": "admin_ui_disabled", "message": "Admin UI is disabled"})
     return HTMLResponse(admin_ui_html())
+
+
+def _referenced_providers() -> list[str]:
+    """Providers actually used by an enabled model, so /ready never probes unused
+    (possibly external) providers."""
+    names: set[str] = set()
+    for details in registry.models.values():
+        if details.get("enabled", True):
+            names.add(details.get("provider", "local"))
+    for policy in registry.virtual_models.values():
+        provider = policy.get("provider")
+        if provider and provider != "auto":
+            names.add(provider)
+    return [name for name in names if name in provider_clients.clients]
 
 
 @app.get("/ready")
 async def ready(_: None = Depends(require_api_key)) -> dict[str, Any]:
-    try:
-        upstream = await provider_clients.get_json("local", "/health")
-        return {"status": "ready", "llama_cpp": upstream, "mcp_enabled": mcp_client.enabled}
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "llama_unavailable", "message": str(exc)},
-        ) from exc
+    async def probe(name: str) -> tuple[str, dict[str, Any]]:
+        try:
+            detail = await provider_clients.ping(name)
+            return name, {"ok": True, "detail": detail}
+        except Exception as exc:
+            return name, {"ok": False, "error": str(exc)}
+
+    # Probe every referenced provider in parallel with a short timeout so readiness
+    # stays fast regardless of how many providers are configured or down.
+    providers_health: dict[str, Any] = dict(
+        await asyncio.gather(*(probe(name) for name in _referenced_providers()))
+    )
+    default_provider = registry.selection(registry.config["routing"]["default_model"]).provider
+    status = "ready" if providers_health.get(default_provider, {}).get("ok") else "unavailable"
+    return {
+        "status": status,
+        "providers": providers_health,
+        "mcp_enabled": mcp_client.enabled,
+        "llama_cpp": providers_health.get(default_provider, {}).get("detail")
+        or providers_health.get("local", {}).get("detail"),
+    }
 
 
 @app.get("/v1/models")
-async def models(_: None = Depends(require_api_key)) -> dict[str, Any]:
-    return registry.openai_models()
+async def models(http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    catalog = registry.openai_models()
+    record = getattr(http_request.state, "api_key", None)
+    allowed = ((record or {}).get("scopes") or {}).get("models") if record else None
+    if allowed:
+        catalog = {**catalog, "data": [item for item in catalog["data"] if item["id"] in allowed]}
+    return catalog
 
 
 @app.post("/v1/chat/completions")
-async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
+async def chat(request: ChatRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
+    http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -276,9 +484,20 @@ async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
 
         if workflow_required(request):
             workflow_request = OrchestrateRequest.model_validate(request.model_dump())
-            response = await orchestrator.orchestrate(workflow_request)
             if request.stream:
-                return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
+                return StreamingResponse(
+                    orchestrator.orchestrate_stream(
+                        workflow_request,
+                        allowed_tools=key_tools_scope(http_request),
+                        allowed_models=key_model_scope(http_request),
+                    ),
+                    media_type="text/event-stream",
+                )
+            response = await orchestrator.orchestrate(
+                workflow_request,
+                allowed_tools=key_tools_scope(http_request),
+                allowed_models=key_model_scope(http_request),
+            )
             return JSONResponse(response)
 
         payload, selection = orchestrator.prepare_direct(request)
@@ -290,6 +509,8 @@ async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
         return JSONResponse(await provider_clients.post_json(selection.provider, "/v1/chat/completions", payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "model_not_found", "model": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "model_forbidden", "message": str(exc)}) from exc
     except httpx.HTTPStatusError as exc:
         raise upstream_error(exc) from exc
     except (httpx.ConnectError, httpx.ReadTimeout) as exc:
@@ -297,7 +518,9 @@ async def chat(request: ChatRequest, _: None = Depends(require_api_key)) -> Any:
 
 
 @app.post("/prompt/improve")
-async def improve(request: ImprovePromptRequest, _: None = Depends(require_api_key)) -> dict[str, Any]:
+async def improve(request: ImprovePromptRequest, http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         selection = registry.selection(request.model)
         improved = await improve_prompt(
@@ -327,7 +550,9 @@ async def consult(request: ConsultPromptRequest, _: None = Depends(require_api_k
 
 
 @app.post("/orchestrate/chat")
-async def orchestrate(request: OrchestrateRequest, _: None = Depends(require_api_key)) -> Any:
+async def orchestrate(request: OrchestrateRequest, http_request: Request, _: None = Depends(require_api_key)) -> Any:
+    http_request.state.metric_model = request.model
+    enforce_model_scope(http_request, request.model)
     try:
         if request.model == "prompt-consultant":
             response = consultation_completion(last_user_content(request.messages), request.model)
@@ -335,24 +560,44 @@ async def orchestrate(request: OrchestrateRequest, _: None = Depends(require_api
                 return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
             return JSONResponse(response)
 
-        response = await orchestrator.orchestrate(request)
         if request.stream:
-            return StreamingResponse(completion_as_sse(response), media_type="text/event-stream")
+            return StreamingResponse(
+                orchestrator.orchestrate_stream(
+                    request,
+                    allowed_tools=key_tools_scope(http_request),
+                    allowed_models=key_model_scope(http_request),
+                ),
+                media_type="text/event-stream",
+            )
+        response = await orchestrator.orchestrate(
+            request,
+            allowed_tools=key_tools_scope(http_request),
+            allowed_models=key_model_scope(http_request),
+        )
         return JSONResponse(response)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail={"code": "model_not_found", "model": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "model_forbidden", "message": str(exc)}) from exc
     except httpx.HTTPStatusError as exc:
         raise upstream_error(exc) from exc
 
 
 @app.get("/mcp/tools")
-async def list_mcp_tools(_: None = Depends(require_api_key)) -> dict[str, Any]:
+async def list_mcp_tools(http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    scope = key_tools_scope(http_request)
+
+    def _scoped(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if scope is None:
+            return tools
+        return [tool for tool in tools if (tool.get("function") or {}).get("name") in scope]
+
     try:
         return {
             "enabled": mcp_client.enabled,
-            "tool_allowlist": sorted(mcp_client.allowlist),
-            "tools": await mcp_client.list_openai_tools(),
-            "available_tools": await mcp_client.list_openai_tools(include_blocked=True, include_disabled=True),
+            "tool_allowlist": sorted(mcp_client.allowlist if scope is None else (mcp_client.allowlist & scope)),
+            "tools": _scoped(await mcp_client.list_openai_tools()),
+            "available_tools": _scoped(await mcp_client.list_openai_tools(include_blocked=True, include_disabled=True)),
         }
     except BaseExceptionGroup as exc:
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
@@ -361,7 +606,8 @@ async def list_mcp_tools(_: None = Depends(require_api_key)) -> dict[str, Any]:
 
 
 @app.post("/mcp/call")
-async def call_mcp_tool(request: ToolCallRequest, _: None = Depends(require_api_key)) -> dict[str, Any]:
+async def call_mcp_tool(request: ToolCallRequest, http_request: Request, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    enforce_tool_scope(http_request, request.name)
     try:
         return await mcp_client.call_tool(request.name, request.arguments)
     except PermissionError as exc:
@@ -372,9 +618,51 @@ async def call_mcp_tool(request: ToolCallRequest, _: None = Depends(require_api_
         raise HTTPException(status_code=503, detail={"code": "mcp_unavailable", "message": str(exc)}) from exc
 
 
+# Recent admin config changes, newest first. In-memory, so it powers the console's
+# activity view without a datastore -- but it is capped and lost on restart. Set
+# AUDIT_LOG_PATH to additionally append every entry to a file that outlives the process.
+AUDIT_LOG: deque[dict[str, Any]] = deque(maxlen=200)
+
+
+def _append_audit_file(entry: dict[str, Any]) -> None:
+    path = settings.audit_log_path
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        # A read-only or full filesystem must not turn a valid admin action into a 500.
+        # The in-memory entry and the log line above still record what happened.
+        logger.warning("audit_file_write_failed path=%s error=%s", path, exc)
+
+
+def _audit(http_request: Request, action: str, **fields: Any) -> None:
+    request_id = getattr(http_request.state, "request_id", "-")
+    # Strip CR/LF from user-supplied values so a crafted model/provider name cannot
+    # forge extra log lines.
+    def _clean(value: Any) -> str:
+        return str(value).replace("\r", " ").replace("\n", " ")
+
+    clean_fields = {key: _clean(value) for key, value in fields.items()}
+    entry = {
+        "id": request_id,
+        "ip": _client_ip(http_request),
+        "action": action,
+        "fields": clean_fields,
+        "at": time.time(),
+    }
+    AUDIT_LOG.appendleft(entry)
+    _append_audit_file(entry)
+    extra = " ".join(f"{key}={value}" for key, value in clean_fields.items())
+    logger.info("admin_audit id=%s ip=%s action=%s %s", request_id, _client_ip(http_request), action, extra)
+
+
 @app.post("/admin/reload")
-async def reload_config(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+async def reload_config(http_request: Request, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
     reload_components()
+    _audit(http_request, "reload")
     return {"success": True, "models": len(model_config["models"]), "virtual_models": len(model_config["virtual_models"])}
 
 
@@ -383,9 +671,95 @@ async def admin_config(_: None = Depends(require_admin_api_key)) -> dict[str, An
     return model_config
 
 
+@app.get("/admin/audit")
+async def admin_audit_log(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return {"entries": list(AUDIT_LOG)}
+
+
+@app.get("/admin/metrics")
+async def admin_metrics(window_seconds: float = 3600.0, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return metrics_store.summary(window_seconds=window_seconds)
+
+
+@app.get("/admin/api-keys")
+async def list_api_keys(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    return {"keys": api_key_store.list()}
+
+
+@app.post("/admin/api-keys")
+async def create_api_key(
+    request: CreateApiKeyRequest,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    record, raw_key = api_key_store.create(
+        request.label,
+        models=request.models,
+        rate_limit_per_min=request.rate_limit_per_min,
+        tools=request.tools,
+        expires_in_days=request.expires_in_days,
+    )
+    scoped_tools = record["scopes"]["tools"]
+    _audit(
+        http_request,
+        "create_api_key",
+        key_id=record["id"],
+        label=record["label"],
+        models=",".join(record["scopes"]["models"]) or "all",
+        tools="all" if scoped_tools is None else (",".join(scoped_tools) or "none"),
+        rate=record["rate_limit_per_min"],
+        expires_in_days=request.expires_in_days or "never",
+    )
+    # The raw key is returned exactly once; it is never stored or shown again.
+    return {"key": raw_key, "record": record}
+
+
+@app.delete("/admin/api-keys/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    if not api_key_store.revoke(key_id):
+        raise HTTPException(status_code=404, detail={"code": "api_key_not_found", "id": key_id})
+    _audit(http_request, "revoke_api_key", key_id=key_id)
+    return {"success": True, "id": key_id}
+
+
+@app.get("/admin/services")
+async def admin_services(_: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+    try:
+        services = await docker_control.list_services()
+    except DockerControlError as exc:
+        return {"enabled": docker_control.enabled, "error": str(exc), "services": []}
+    return {"enabled": docker_control.enabled, "services": services}
+
+
+@app.post("/admin/services/{name}/{action}")
+async def admin_service_action(
+    name: str,
+    action: str,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    try:
+        result = await docker_control.set_service(name, action)
+    except DockerControlDisabled as exc:
+        raise HTTPException(status_code=503, detail={"code": "docker_control_disabled", "message": str(exc)}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "service_forbidden", "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_action", "message": str(exc)}) from exc
+    except DockerControlError as exc:
+        raise HTTPException(status_code=503, detail={"code": "docker_unavailable", "message": str(exc)}) from exc
+    _audit(http_request, f"service_{action}", service=name)
+    return result
+
+
 @app.post("/admin/config/virtual-model")
 async def update_virtual_model(
     request: UpdateVirtualModelRequest,
+    http_request: Request,
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
     if request.provider not in model_config.get("providers", {"local": {}}):
@@ -401,12 +775,14 @@ async def update_virtual_model(
     }
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "update_virtual_model", virtual_model=request.virtual_model, provider=request.provider, target=request.model)
     return model_config
 
 
 @app.post("/admin/config/prompt-improver")
 async def update_prompt_improver(
     request: UpdatePromptImproverRequest,
+    http_request: Request,
     _: None = Depends(require_admin_api_key),
 ) -> dict[str, Any]:
     if request.provider not in model_config.get("providers", {"local": {}}):
@@ -422,23 +798,37 @@ async def update_prompt_improver(
     updated["prompt_improver"] = prompt
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "update_prompt_improver", provider=request.provider, model=request.model)
     return model_config
 
 
 @app.put("/admin/config")
-async def update_admin_config(new_config: dict[str, Any], _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
-    if "models" not in new_config or "virtual_models" not in new_config:
+async def update_admin_config(
+    new_config: dict[str, Any],
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
+    try:
+        # Dry-run: fully build components from the candidate config before touching disk,
+        # so an invalid payload can never corrupt the persisted config or break a restart.
+        build_components(new_config)
+    except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(
             status_code=400,
-            detail={"code": "invalid_config", "message": "Config must contain models and virtual_models"},
-        )
+            detail={"code": "invalid_config", "message": f"Config rejected: {exc}"},
+        ) from exc
     save_model_config(settings.model_config_path, new_config)
     reload_components()
+    _audit(http_request, "replace_config", models=len(model_config["models"]), virtual_models=len(model_config["virtual_models"]))
     return {"success": True, "models": len(model_config["models"]), "virtual_models": len(model_config["virtual_models"])}
 
 
 @app.patch("/admin/mcp/tools")
-async def patch_mcp_tools(request: PatchMcpToolsRequest, _: None = Depends(require_admin_api_key)) -> dict[str, Any]:
+async def patch_mcp_tools(
+    request: PatchMcpToolsRequest,
+    http_request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict[str, Any]:
     updated = deepcopy(model_config)
     mcp_config = updated.setdefault("mcp", {})
     if request.enabled is not None:
@@ -456,6 +846,7 @@ async def patch_mcp_tools(request: PatchMcpToolsRequest, _: None = Depends(requi
     mcp_config["tool_allowlist"] = sorted(allowlist)
     save_model_config(settings.model_config_path, updated)
     reload_components()
+    _audit(http_request, "patch_mcp_tools", enabled=mcp_client.enabled, tools=len(mcp_client.allowlist))
     return {
         "success": True,
         "mcp_enabled": mcp_client.enabled,

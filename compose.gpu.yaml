@@ -1,0 +1,41 @@
+# Opt-in overlay that runs llama-main/llama-prompt on the CUDA build of llama.cpp
+# and reserves an NVIDIA GPU for them. Requires the NVIDIA Container Toolkit
+# (nvidia docker runtime) on the host -- without it, `docker compose up` fails to
+# start these services at all, which is why this stays a separate opt-in file
+# instead of living in the base compose.yaml.
+#
+# Usage:
+#   docker compose --env-file .env.docker -f compose.yaml -f compose.gpu.yaml \
+#     up -d --force-recreate llama-main llama-prompt
+#
+# Set LLAMA_GPU_LAYERS in .env.docker to how many layers to offload (99 = all).
+# Two models sharing a 6-8GB card at a large context size may not both fit fully
+# offloaded -- if a container OOMs or fails to start, lower LLAMA_GPU_LAYERS or
+# LLAMA_CTX_SIZE, or offload only one of the two models.
+#
+# First start after (re)creating these containers can take several minutes: llama.cpp's
+# VRAM auto-fit step silently searches for how many layers fit before it starts
+# listening, with no log output while it works. `docker ps` shows the container as
+# "unhealthy" and any request gets connection-refused (surfaced by the orchestrator as
+# a clean 503/SSE error, not a crash) until that finishes -- this is expected, not a
+# failure. Watch `docker logs <container>` for "model loaded" / "server is listening".
+services:
+  llama-main:
+    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  llama-prompt:
+    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

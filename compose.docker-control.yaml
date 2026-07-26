@@ -1,0 +1,22 @@
+# Opt-in overlay that lets the orchestrator start/stop the model containers from the
+# admin console. It mounts the Docker socket into the orchestrator, which is roughly
+# host-root access -- enable it ONLY on a machine you trust, behind the admin key.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.docker-control.yaml --profile models up -d
+#
+# For anything less trusted, put a docker-socket-proxy in front and point
+# DOCKER_SOCKET at the proxy so only container start/stop is exposed.
+services:
+  orchestrator:
+    # The image runs as the non-root "app" user, which cannot read the root-owned
+    # Docker socket. This overlay already grants host-root-equivalent access, so run
+    # this one container as root to reach the socket. (For a least-privilege setup,
+    # drop this and instead put a docker-socket-proxy in front, pointing DOCKER_SOCKET
+    # at the proxy.)
+    user: root
+    environment:
+      DOCKER_CONTROL_ENABLED: "true"
+      DOCKER_COMPOSE_PROJECT: ${DOCKER_COMPOSE_PROJECT:-local-llm}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

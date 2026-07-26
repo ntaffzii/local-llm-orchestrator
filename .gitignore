@@ -8,3 +8,12 @@ __pycache__/
 .test-deps/
 models/**/*.gguf
 models/**/*.bin
+
+# Issued API keys (hashes) — never commit
+config/api_keys.json
+
+# Persisted admin audit log (AUDIT_LOG_PATH), when written into the repo
+*.jsonl
+
+# Local agent/editor settings (machine-specific paths and permissions)
+.claude/settings.local.json

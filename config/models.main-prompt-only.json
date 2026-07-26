@@ -1,10 +1,5 @@
 {
   "providers": {
-    "local": {
-      "type": "openai-compatible",
-      "base_url": "",
-      "api_key_env": ""
-    },
     "main": {
       "type": "openai-compatible",
       "base_url": "${LLAMA_MAIN_URL}",
@@ -14,16 +9,6 @@
       "type": "openai-compatible",
       "base_url": "${LLAMA_PROMPT_URL}",
       "api_key_env": ""
-    },
-    "lmstudio": {
-      "type": "openai-compatible",
-      "base_url": "http://127.0.0.1:1234/v1",
-      "api_key_env": ""
-    },
-    "openrouter": {
-      "type": "openai-compatible",
-      "base_url": "https://openrouter.ai/api/v1",
-      "api_key_env": "OPENROUTER_API_KEY"
     }
   },
   "models": {
@@ -67,67 +52,6 @@
         }
       },
       "enabled": true
-    },
-    "qwen-tools": {
-      "display_name": "Qwen Tools Model",
-      "provider": "local",
-      "capabilities": [
-        "chat",
-        "tools"
-      ],
-      "defaults": {
-        "temperature": 0.1,
-        "max_tokens": 1536,
-        "stop": [
-          "<|im_end|>",
-          "<|im_start|>"
-        ],
-        "chat_template_kwargs": {
-          "enable_thinking": false
-        }
-      },
-      "enabled": true
-    },
-    "qwen-coder": {
-      "display_name": "Coding Model",
-      "provider": "local",
-      "capabilities": [
-        "chat",
-        "code",
-        "tools"
-      ],
-      "defaults": {
-        "temperature": 0.2,
-        "max_tokens": 1536,
-        "stop": [
-          "<|im_end|>",
-          "<|im_start|>"
-        ],
-        "chat_template_kwargs": {
-          "enable_thinking": false
-        }
-      },
-      "enabled": true
-    },
-    "vision-model": {
-      "display_name": "Vision Model",
-      "provider": "local",
-      "capabilities": [
-        "chat",
-        "vision"
-      ],
-      "defaults": {
-        "temperature": 0.2,
-        "max_tokens": 2048,
-        "stop": [
-          "<end_of_turn>",
-          "<eos>"
-        ],
-        "chat_template_kwargs": {
-          "enable_thinking": false
-        }
-      },
-      "enabled": true
     }
   },
   "virtual_models": {
@@ -148,35 +72,11 @@
       "improve_prompt": true,
       "tools": false
     },
-    "main-llm-improved-tools": {
-      "provider": "local",
-      "model": "qwen-tools",
-      "improve_prompt": true,
-      "tools": true
-    },
     "main-llm-tools": {
-      "provider": "local",
-      "model": "qwen-tools",
+      "provider": "main",
+      "model": "gemma4-e2b",
       "improve_prompt": false,
       "tools": true
-    },
-    "coding": {
-      "provider": "local",
-      "model": "qwen-coder",
-      "improve_prompt": false,
-      "tools": false
-    },
-    "coding-improved": {
-      "provider": "local",
-      "model": "qwen-coder",
-      "improve_prompt": true,
-      "tools": false
-    },
-    "vision": {
-      "provider": "local",
-      "model": "vision-model",
-      "improve_prompt": false,
-      "tools": false
     },
     "prompt": {
       "provider": "prompt",
@@ -193,8 +93,8 @@
   },
   "routing": {
     "default_model": "gemma4-e2b",
-    "coding_model": "qwen-coder",
-    "vision_model": "vision-model",
+    "coding_model": "gemma4-e2b",
+    "vision_model": "gemma4-e2b",
     "prompt_model": "lfm2.5-prompt",
     "short_prompt_words": 10,
     "coding_keywords": [
@@ -254,12 +154,19 @@
   "mcp": {
     "enabled": true,
     "tool_allowlist": [
+      "browse_dynamic_webpage",
+      "browse_webpage",
       "build_agent_context",
+      "check_browser_capabilities",
+      "fetch_url",
       "get_toolset",
       "list_toolsets",
       "load_skill",
       "load_workflow",
-      "route_request"
+      "open_website",
+      "route_request",
+      "search_web",
+      "search_web_news"
     ]
   }
 }

@@ -112,6 +112,32 @@ async def test_prompt_service_preserves_original_creative_premise():
     assert THAI_CREATIVE_PROMPT in improved
 
 
+THAI_SIMPLE_SCRIPT_PROMPT = "สอนผมเขียนโค้ด python บวกเลขสองจำนวนหน่อย"
+
+
+def test_plain_script_request_skips_api_specific_guardrails():
+    # "python" alone classifies this as task_type "code", but the request is a
+    # trivial two-number addition script -- it has nothing to do with an API, so
+    # it must not get status-code/endpoint/framework/curl guardrails injected.
+    analysis = PromptAnalyzer().analyze(THAI_SIMPLE_SCRIPT_PROMPT)
+    assert analysis.task_type == "code"
+
+    improved = _enforce_required_guardrails(
+        "Write a Python script that adds two numbers and prints the result.",
+        analysis,
+        THAI_SIMPLE_SCRIPT_PROMPT,
+    )
+
+    assert "status code" not in improved.lower()
+    assert "curl" not in improved.lower()
+    assert "<endpoint_path>" not in improved
+    assert "<framework>" not in improved
+    assert "fake timestamp" not in improved.lower()
+    # Generic, always-appropriate guardrails should still be present.
+    assert "assumption" in improved.lower()
+    assert "minimal" in improved.lower()
+
+
 def test_code_guardrails_do_not_duplicate_provided_framework_or_endpoint():
     analysis = PromptAnalyzer().analyze(FASTAPI_HEALTH_PROMPT)
     improved = _enforce_required_guardrails(
@@ -163,3 +189,28 @@ def test_prompt_consultant_returns_template_guidance():
     assert "minimal implementation" in " ".join(consultation["recommendation"]["how_to_write"])
     assert consultation["template"]["rubric"]
     assert consultation["questions_to_ask_first"]
+
+
+import pytest as _pytest
+
+_GUARDRAIL_CASES = [
+    ("code", "ช่วยเขียน api ง่ายๆ สำหรับเช็คสถานะ server", "Please write an API."),
+    ("creative", THAI_CREATIVE_PROMPT, "Write a story."),
+    ("qa", THAI_CURRENT_QA_PROMPT, "Answer this."),
+    ("analysis", "Analyze the pros and cons of remote work for engineering teams.", "Analyze remote work."),
+    ("summary", "Summarize this quarterly financial report into three bullet points.", "Summarize the report."),
+    ("extraction", "Extract all customer names and order IDs from this text.", "Extract the fields."),
+    ("translation", "Translate this paragraph from Thai to English.", "Translate the text."),
+    ("rag", "Using the provided documents only, answer what the refund policy says.", "Answer from sources."),
+]
+
+
+@_pytest.mark.parametrize("expected_type,prompt,improved", _GUARDRAIL_CASES)
+def test_guardrails_cover_every_task_type(expected_type, prompt, improved):
+    analysis = PromptAnalyzer().analyze(prompt)
+    out = _enforce_required_guardrails(improved, analysis, prompt)
+    # Every task type must always emit the guardrails block with the two base lines.
+    assert "Required guardrails:" in out
+    assert "State important assumptions before completing the task." in out
+    assert "Use placeholders for important missing details instead of inventing concrete values." in out
+    assert out.startswith(improved)
